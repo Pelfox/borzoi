@@ -1,0 +1,11 @@
+[package]
+name = "borzoi"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.102"
+log = "0.4.33"
+pretty_env_logger = "0.5.0"
+smithay = { version = "0.7.0", features = ["wayland_frontend", "backend_winit"] }
+wayland-server = "0.31.13"
