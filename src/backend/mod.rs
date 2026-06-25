@@ -1,8 +1,6 @@
 //! Implementation for different backends. In this context, a backend is the
 //! gluing part between compositor and user input (keyboard, mouse), rendering
 //! and so on.
-use std::fmt::Debug;
-
 use smithay::utils::{Physical, Size};
 
 use crate::compositor::CompositorAppState;
@@ -10,7 +8,7 @@ use crate::compositor::CompositorAppState;
 pub mod winit;
 
 /// Describes renderer backend for the compositor.
-pub trait Backend: Debug {
+pub trait Backend {
     /// Initializes renderer for the given compositor state.
     fn init_renderer(&mut self, app_state: &mut CompositorAppState) -> anyhow::Result<()>;
     /// Processes incoming events from the renderer.

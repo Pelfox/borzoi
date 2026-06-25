@@ -5,10 +5,10 @@ use std::{ffi::OsString, sync::Arc};
 
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    desktop::{PopupKind, PopupManager, Space, Window},
+    desktop::{PopupKind, PopupManager, Space, Window, WindowSurfaceType},
     input::{SeatHandler, SeatState},
     reexports::calloop::{EventLoop, Interest, LoopSignal, Mode, PostAction, generic::Generic},
-    utils::Serial,
+    utils::{Logical, Point, Serial},
     wayland::{
         buffer::BufferHandler,
         compositor::{CompositorClientState, CompositorHandler, CompositorState, with_states},
@@ -36,7 +36,6 @@ use xkeysym::KeyCode;
 use crate::{backend::Backend, client::ClientState, input_state::InputState};
 
 /// Represents the compositor state at any given moment in time.
-#[derive(Debug)]
 pub struct CompositorAppState {
     /// Internal XDG shell state for the compositor.
     xdg_shell_state: XdgShellState,
@@ -60,7 +59,7 @@ pub struct CompositorAppState {
     /// Tracker for windows' popups.
     pub popups: PopupManager,
     /// Current state of the input devices (mouse and keyboard).
-    pub input_state: InputState,
+    pub input_state: InputState<CompositorAppState>,
     /// The name of the socket that the compositor is binded to.
     pub wayland_socket_name: Option<OsString>,
     /// When this compositor session has began.
@@ -93,6 +92,16 @@ impl CompositorAppState {
         if let Some(backend) = self.backend.as_mut() {
             backend.request_redraw();
         }
+    }
+
+    pub fn surface_under_location(
+        &self,
+        location: Point<f64, Logical>,
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        let (window, window_location) = self.space.element_under(location)?;
+        let relative_to_window = location - window_location.to_f64();
+        let surface = window.surface_under(relative_to_window, WindowSurfaceType::ALL);
+        surface.map(|(surface, surface_location)| (surface, surface_location.to_f64()))
     }
 }
 
@@ -237,7 +246,6 @@ smithay::delegate_shm!(CompositorAppState);
 smithay::delegate_data_device!(CompositorAppState);
 
 /// Represents the core part of the compositor - the application itself.
-#[derive(Debug)]
 pub struct CompositorApp {
     /// Wayland server display. Moved into the event loop once event sources
     /// are registered.
@@ -263,21 +271,20 @@ impl CompositorApp {
         let event_loop = EventLoop::<CompositorAppState>::try_new()?;
         let loop_signal = event_loop.get_signal();
 
+        // TODO(input): Move seat into the [InputState].
         let mut seat_state = SeatState::<CompositorAppState>::new();
-        let mut seat = seat_state.new_wl_seat(&display_handle, "seat-0");
-        seat.add_keyboard(Default::default(), 200, 25)?;
-        seat.add_pointer();
+        let input_state = InputState::new(&display_handle, &mut seat_state);
 
         let state = CompositorAppState {
             compositor_state,
             display_handle,
             backend: None,
             loop_signal,
-            xdg_shell_state: xdg_shell_state,
+            xdg_shell_state,
             space: Space::default(),
             popups: PopupManager::default(),
             seat_state,
-            input_state: InputState::default(),
+            input_state,
             wayland_socket_name: None,
             start_time: std::time::Instant::now(),
             shm_state,

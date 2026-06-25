@@ -1,51 +1,85 @@
 use std::collections::{HashMap, HashSet};
 
-use smithay::backend::input::{Device, DeviceCapability};
+use smithay::{
+    backend::input::{Device, DeviceCapability},
+    input::{Seat, SeatHandler, SeatState, keyboard::KeyboardHandle, pointer::PointerHandle},
+    wayland::seat::{SeatGlobalData, WaylandFocus},
+};
+use wayland_server::{DisplayHandle, GlobalDispatch, protocol::wl_seat::WlSeat};
 use xkeysym::KeyCode;
 
-#[derive(Debug, Hash, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub enum KnownDeviceType {
-    Unknown,
     Keyboard,
     Mouse,
 }
 
-impl KnownDeviceType {
-    pub fn from_device<D: Device>(device: &D) -> Self {
-        if device.has_capability(DeviceCapability::Keyboard) {
-            KnownDeviceType::Keyboard
-        } else if device.has_capability(DeviceCapability::Pointer) {
-            KnownDeviceType::Mouse
-        } else {
-            KnownDeviceType::Unknown
-        }
-    }
-}
-
-#[derive(Debug, Hash, PartialEq, Eq)]
-pub struct KnownDevice {
+pub struct KnownDevice<S: SeatHandler> {
     pub name: String,
-    pub device_type: KnownDeviceType,
+    pub keyboard_handle: Option<KeyboardHandle<S>>,
+    pub pointer_handle: Option<PointerHandle<S>>,
 }
 
-#[derive(Debug, Default)]
-pub struct InputState {
-    known_devices: HashMap<String, KnownDevice>,
+pub struct InputState<S: SeatHandler> {
+    seat: Seat<S>,
+    known_devices: HashMap<String, KnownDevice<S>>,
     active_keyboard_keys: HashSet<KeyCode>,
 }
 
-impl InputState {
-    pub fn on_device_added<D: Device>(&mut self, device: D) {
-        let device_type = KnownDeviceType::from_device(&device);
-        let known_device = KnownDevice {
+impl<S> InputState<S>
+where
+    S: SeatHandler + 'static,
+    <S as SeatHandler>::KeyboardFocus: WaylandFocus,
+    <S as SeatHandler>::PointerFocus: WaylandFocus,
+    S: GlobalDispatch<WlSeat, SeatGlobalData<S>>,
+{
+    pub fn new(display_handle: &DisplayHandle, seat_state: &mut SeatState<S>) -> Self {
+        let seat = seat_state.new_wl_seat(&display_handle, "seat-0");
+
+        Self {
+            seat,
+            known_devices: HashMap::default(),
+            active_keyboard_keys: HashSet::default(),
+        }
+    }
+
+    pub fn on_device_added<D: Device>(&mut self, device: D) -> anyhow::Result<()> {
+        let mut known_device = KnownDevice {
             name: device.name(),
-            device_type,
+            keyboard_handle: None,
+            pointer_handle: None,
         };
+
+        if device.has_capability(DeviceCapability::Keyboard) {
+            let keyboard_handle = self.seat.add_keyboard(Default::default(), 200, 25).ok();
+            known_device.keyboard_handle = keyboard_handle;
+        }
+
+        if device.has_capability(DeviceCapability::Pointer) {
+            known_device.pointer_handle = Some(self.seat.add_pointer());
+        }
+
         self.known_devices.insert(device.id(), known_device);
+        Ok(())
     }
 
     pub fn on_device_removed<D: Device>(&mut self, device: D) {
         self.known_devices.remove(&device.id());
+    }
+
+    pub fn pointer_handle_for_device<D: Device>(
+        &self,
+        device: D,
+    ) -> anyhow::Result<PointerHandle<S>> {
+        let known_device = self
+            .known_devices
+            .get(&device.id())
+            .ok_or(anyhow::anyhow!("device is not registered"))?;
+        if let Some(pointer_handle) = &known_device.pointer_handle {
+            return Ok(pointer_handle.clone());
+        } else {
+            anyhow::bail!("given device is not a mouse")
+        }
     }
 
     // TODO(keystrokes): Maybe we should check for the keyboard too?

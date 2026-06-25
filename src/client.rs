@@ -7,7 +7,7 @@ use smithay::wayland::compositor::CompositorClientState;
 use wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 
 /// Represents a single client's state in the compositor.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct ClientState {
     /// Current compositor state of the client.
     pub compositor_state: CompositorClientState,

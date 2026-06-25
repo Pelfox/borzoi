@@ -3,23 +3,23 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use smithay::{
     backend::{
-        input::KeyboardKeyEvent,
+        input::{AbsolutePositionEvent, Event, KeyboardKeyEvent},
         renderer::{
             Color32F, damage::OutputDamageTracker, element::surface::WaylandSurfaceRenderElement,
             gles::GlesRenderer,
         },
         winit::{self, WinitEventLoop, WinitGraphicsBackend},
     },
+    input::pointer::MotionEvent,
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{calloop::LoopHandle, winit::dpi::PhysicalSize},
-    utils::{Physical, Rectangle, Size, Transform},
+    utils::{Physical, Rectangle, SERIAL_COUNTER, Size, Transform},
 };
 use wayland_server::backend::GlobalId;
 
 use crate::{backend::Backend, compositor::CompositorAppState};
 
 /// Describes the current state of the backend renderer.
-#[derive(Debug)]
 struct WinitBackendRenderer {
     /// Actual renderer reference for the backend.
     backend: WinitGraphicsBackend<GlesRenderer>,
@@ -30,7 +30,6 @@ struct WinitBackendRenderer {
 }
 
 /// Implements [Backend] using winit (drawing the whole compositor in a window).
-#[derive(Debug)]
 pub struct WinitBackend {
     /// Holds winit's lifecycle-bound event loop.
     winit_event_loop: Option<WinitEventLoop>,
@@ -213,15 +212,32 @@ impl Backend for WinitBackend {
                                 state.process_shortcuts();
                             }
                             smithay::backend::input::InputEvent::DeviceAdded { device } => {
-                                state.input_state.on_device_added(device);
+                                if let Err(e) = state.input_state.on_device_added(device) {
+                                    log::error!("Failed to register a new device: {e:?}");
+                                }
                             }
                             smithay::backend::input::InputEvent::DeviceRemoved { device } => {
                                 state.input_state.on_device_removed(device);
                             }
-                            // smithay::backend::input::InputEvent::PointerMotion { event } => todo!(),
-                            // smithay::backend::input::InputEvent::PointerMotionAbsolute {
-                            //     event,
-                            // } => todo!(),
+                            smithay::backend::input::InputEvent::PointerMotionAbsolute {
+                                event,
+                            } => {
+                                let output_size = renderer_inner.borrow().backend.window_size().to_logical(1);
+                                let location = event.position_transformed(output_size);
+                                let surface_underneath = state.surface_under_location(location);
+
+                                match state.input_state.pointer_handle_for_device(event.device()) {
+                                    Ok(pointer) => {
+                                        let event = MotionEvent {
+                                            location,
+                                            serial: SERIAL_COUNTER.next_serial(),
+                                            time: event.time_msec(),
+                                        };
+                                        pointer.motion(state, surface_underneath, &event);
+                                    },
+                                    Err(e) => log::error!("Failed acquire pointer handle for the device: {e:?}"),
+                                };
+                            },
                             // smithay::backend::input::InputEvent::PointerButton { event } => todo!(),
                             // smithay::backend::input::InputEvent::PointerAxis { event } => todo!(),
                             event => log::debug!("Received input event from winit: {event:?}"),
