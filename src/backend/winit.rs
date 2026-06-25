@@ -1,30 +1,45 @@
 //! Implements rendering backend, backed by winit.
+use std::{cell::RefCell, rc::Rc, time::Duration};
+
 use smithay::{
     backend::{
-        renderer::gles::GlesRenderer,
+        input::KeyboardKeyEvent,
+        renderer::{
+            Color32F, damage::OutputDamageTracker, element::surface::WaylandSurfaceRenderElement,
+            gles::GlesRenderer,
+        },
         winit::{self, WinitEventLoop, WinitGraphicsBackend},
     },
     output::{Mode, Output, PhysicalProperties, Subpixel},
-    reexports::calloop::LoopHandle,
-    utils::{Physical, Size},
+    reexports::{calloop::LoopHandle, winit::dpi::PhysicalSize},
+    utils::{Physical, Rectangle, Size, Transform},
 };
 use wayland_server::backend::GlobalId;
 
 use crate::{backend::Backend, compositor::CompositorAppState};
 
+/// Describes the current state of the backend renderer.
+#[derive(Debug)]
+struct WinitBackendRenderer {
+    /// Actual renderer reference for the backend.
+    backend: WinitGraphicsBackend<GlesRenderer>,
+    /// Created Wayland output for the renderer.
+    output: Option<Output>,
+    /// Tracker for framebuffer differences (damage).
+    damage_tracker: Option<OutputDamageTracker>,
+}
+
 /// Implements [Backend] using winit (drawing the whole compositor in a window).
 #[derive(Debug)]
 pub struct WinitBackend {
-    /// Holds graphics backend for the winit, using Gles (OpenGL ES) rendering.
-    backend: WinitGraphicsBackend<GlesRenderer>,
     /// Holds winit's lifecycle-bound event loop.
     winit_event_loop: Option<WinitEventLoop>,
     /// Holds compositor main event loop's handle.
     event_loop_handle: LoopHandle<'static, CompositorAppState>,
     /// Holds an ID of the created winit window.
     global_id: Option<GlobalId>,
-    /// Holds created output Wayland global.
-    output: Option<Output>,
+    /// References a shared backend renderer.
+    renderer: Rc<RefCell<WinitBackendRenderer>>,
 }
 
 impl WinitBackend {
@@ -33,48 +48,67 @@ impl WinitBackend {
         event_loop_handle: LoopHandle<'static, CompositorAppState>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let (backend, winit_event_loop) = winit::init::<GlesRenderer>()?;
-        Ok(Self {
+        let renderer = WinitBackendRenderer {
             backend,
+            output: None,
+            damage_tracker: None,
+        };
+        Ok(Self {
             winit_event_loop: Some(winit_event_loop),
             event_loop_handle,
             global_id: None,
-            output: None,
+            renderer: Rc::new(RefCell::new(renderer)),
         })
     }
 }
 
 impl Backend for WinitBackend {
     fn output_size(&self) -> Size<i32, Physical> {
-        self.backend.window_size()
+        self.renderer.borrow().backend.window_size()
     }
 
-    fn init_renderer(&mut self, app_state: &CompositorAppState) -> anyhow::Result<()> {
-        let refresh_rate = self
-            .backend
-            .window()
-            .primary_monitor()
-            .and_then(|monitor| monitor.refresh_rate_millihertz())
-            .map(|rate| rate as i32)
-            .unwrap_or(60_000);
+    fn init_renderer(&mut self, app_state: &mut CompositorAppState) -> anyhow::Result<()> {
+        let mut renderer = self.renderer.borrow_mut();
+
+        let (mut refresh_rate, mut monitor_size) = (60_000, PhysicalSize::new(512, 512));
+        if let Some(monitor) = renderer.backend.window().primary_monitor() {
+            if let Some(monitor_refresh_rate) = monitor.refresh_rate_millihertz() {
+                refresh_rate = monitor_refresh_rate as i32;
+            }
+            monitor_size = monitor.size();
+        }
 
         let mode = Mode {
-            size: self.backend.window_size(),
+            size: renderer.backend.window_size(),
             refresh: refresh_rate,
         };
         let output = Output::new(
             "output-0".into(),
             PhysicalProperties {
-                size: (255, 255).into(),
+                size: (monitor_size.width as i32, monitor_size.height as i32).into(),
                 subpixel: Subpixel::Unknown,
                 make: "winit".into(),
                 model: "unknown".into(),
             },
         );
+        log::info!("Target refresh_rate: {refresh_rate:?}, monitor size: {monitor_size:?}");
+        log::info!("Target window size: {:?}", renderer.backend.window_size());
 
         let global_id = output.create_global::<CompositorAppState>(&app_state.display_handle);
         self.global_id = Some(global_id);
+
+        // Update output's mode for future drawing requests.
+        output.change_current_state(
+            Some(mode),
+            Some(Transform::Flipped180),
+            None,
+            Some((0, 0).into()),
+        );
         output.set_preferred(mode);
-        self.output = Some(output);
+        app_state.space.map_output(&output, (0, 0));
+
+        renderer.damage_tracker = Some(OutputDamageTracker::from_output(&output));
+        renderer.output = Some(output);
 
         Ok(())
     }
@@ -84,13 +118,129 @@ impl Backend for WinitBackend {
             Some(event_loop) => event_loop,
             None => anyhow::bail!("winit event loop was already registered"),
         };
+        let renderer_inner = Rc::clone(&self.renderer);
 
         self.event_loop_handle
             .insert_source(winit_event_loop, move |event, _, state| {
-                log::debug!("Received winit event: {event:?}, state: {state:?}");
+                match event {
+                    winit::WinitEvent::Redraw => {
+                        let WinitBackendRenderer {
+                            backend,
+                            output,
+                            damage_tracker,
+                        } = &mut *renderer_inner.borrow_mut();
+
+                        let size = backend.window_size();
+                        let damage = Rectangle::from_size(size);
+
+                        let Some(output) = output.as_ref() else {
+                            log::error!("Redrawn requested before output was initialized");
+                            return;
+                        };
+
+                        {
+                            let (renderer, mut framebuffer);
+                            match backend.bind() {
+                                Ok((result_renderer, result_framebuffer)) => {
+                                    renderer = result_renderer;
+                                    framebuffer = result_framebuffer;
+                                }
+                                Err(e) => {
+                                    log::error!("failed to acquire renderer and framebuffer from backend: {e:?}");
+                                    return;
+                                }
+                            }
+
+                            let Some(damage_tracker) = damage_tracker.as_mut() else {
+                                log::error!("Redrawn requested before damage tracker was initialized");
+                                return;
+                            };
+
+                            let render_result = smithay::desktop::space::render_output::<
+                                _,
+                                WaylandSurfaceRenderElement<GlesRenderer>,
+                                _,
+                                _,
+                            >(
+                                output,
+                                renderer,
+                                &mut framebuffer,
+                                1.0,            // Opacity for the drawn texture.
+                                0,              // How old the buffer is.
+                                [&state.space], // Space to draw the window in.
+                                &[],            // Cursors, decorations, and so on.
+                                damage_tracker,
+                                Color32F::new(0.0, 0.0, 0.0, 1.0), // Background color used to clear out the output.
+                            );
+                            match render_result {
+                                Ok(..) => log::debug!("Successfully rendered the output"),
+                                Err(e) => log::error!("Failed to render the output: {e:?}"),
+                            }
+                        }
+
+                        if let Err(e) = backend.submit(Some(&[damage])) {
+                            log::error!("Failed to submit damage to the backend renderer: {e:?}");
+                        }
+
+                        state.space.elements().for_each(|window| {
+                            window.send_frame(
+                                output,
+                                state.start_time.elapsed(),
+                                Some(Duration::ZERO),
+                                |_, _| Some(output.clone()),
+                            );
+                        });
+
+                        state.space.refresh();
+                        state.popups.cleanup();
+                        if let Err(e) = state.display_handle.flush_clients() {
+                            log::error!("Failed to flush display clients: {e:?}");
+                        }
+
+                        backend.window().request_redraw();
+                    }
+                    winit::WinitEvent::Input(input) => {
+                        match input {
+                            smithay::backend::input::InputEvent::Keyboard { event } => {
+                                match event.state() {
+                                    smithay::backend::input::KeyState::Released => {
+                                        state.input_state.on_keyboard_key_release(event.key_code());
+                                    }
+                                    smithay::backend::input::KeyState::Pressed => {
+                                        state.input_state.on_keyboard_key_press(event.key_code());
+                                    }
+                                }
+                                state.process_shortcuts();
+                            }
+                            smithay::backend::input::InputEvent::DeviceAdded { device } => {
+                                state.input_state.on_device_added(device);
+                            }
+                            smithay::backend::input::InputEvent::DeviceRemoved { device } => {
+                                state.input_state.on_device_removed(device);
+                            }
+                            // smithay::backend::input::InputEvent::PointerMotion { event } => todo!(),
+                            // smithay::backend::input::InputEvent::PointerMotionAbsolute {
+                            //     event,
+                            // } => todo!(),
+                            // smithay::backend::input::InputEvent::PointerButton { event } => todo!(),
+                            // smithay::backend::input::InputEvent::PointerAxis { event } => todo!(),
+                            event => log::debug!("Received input event from winit: {event:?}"),
+                        }
+                    }
+                    winit::WinitEvent::CloseRequested => state.loop_signal.stop(),
+                    winit::WinitEvent::Focus(is_focused) => {
+                        state.input_state.clear_keyboard_keys();
+                        log::info!("Focus state changed to: is_focused={is_focused}");
+                    }
+                    _ => {}
+                };
             })
             .map_err(|err| anyhow::anyhow!("failed to register winit event source: {err:?}"))?;
 
         Ok(())
+    }
+
+    fn request_redraw(&mut self) {
+        self.renderer.borrow().backend.window().request_redraw();
     }
 }

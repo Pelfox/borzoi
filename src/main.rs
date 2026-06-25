@@ -1,6 +1,7 @@
 pub mod backend;
 pub mod client;
 pub mod compositor;
+pub mod input_state;
 
 use wayland_server::Display;
 
@@ -16,9 +17,6 @@ fn main() -> anyhow::Result<()> {
     app.bind_wayland_socket()?;
     app.register_display_event_sources()?;
     app.register_backend(backend)?;
-
-    // Run an example application.
-    std::process::Command::new("ghostty").spawn().ok();
 
     app.run_event_loop()?;
     Ok(())
