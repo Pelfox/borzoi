@@ -1,17 +1,14 @@
 //! This is the main entry for the whole compositor setup. This module contains
 //! all core parts for the compositor.
 
-use std::{ffi::OsString, sync::Arc};
-
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    desktop::{PopupKind, PopupManager, Space, Window, WindowSurfaceType},
-    input::{SeatHandler, SeatState},
+    input::{SeatHandler, SeatState, keyboard::keysyms},
     reexports::calloop::{EventLoop, Interest, LoopSignal, Mode, PostAction, generic::Generic},
-    utils::{Logical, Point, Serial},
+    utils::Serial,
     wayland::{
         buffer::BufferHandler,
-        compositor::{CompositorClientState, CompositorHandler, CompositorState, with_states},
+        compositor::{CompositorClientState, CompositorHandler, CompositorState},
         output::OutputHandler,
         selection::{
             SelectionHandler,
@@ -21,19 +18,23 @@ use smithay::{
         },
         shell::xdg::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
-            XdgToplevelSurfaceData,
         },
         shm::{ShmHandler, ShmState},
         socket::ListeningSocketSource,
     },
 };
 use wayland_server::{
-    Client, Display, DisplayHandle, Resource,
+    Client, Display, Resource,
     protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_surface::WlSurface},
 };
-use xkeysym::KeyCode;
 
-use crate::{backend::Backend, client::ClientState, input_state::InputState};
+use crate::{
+    backend::Backend,
+    client::ClientState,
+    input_state::InputState,
+    layout::LayoutManager,
+    shortcut::{KeyboardModifiers, RegisteredShortcut, ShortcutAction, ShortcutsComponent},
+};
 
 /// Represents the compositor state at any given moment in time.
 pub struct CompositorAppState {
@@ -48,60 +49,23 @@ pub struct CompositorAppState {
     /// Internal state for the shared device data.
     data_device_state: DataDeviceState,
 
-    /// Handle to the Wayland server display, used to add clients.
-    pub display_handle: DisplayHandle,
     /// Target rendering backend for the compositor.
     pub backend: Option<Box<dyn Backend>>,
+
     /// Signal, attached to the main event loop.
     pub loop_signal: LoopSignal,
-    /// Two dimentional plane which maps all windows to a single output.
-    pub space: Space<Window>,
-    /// Tracker for windows' popups.
-    pub popups: PopupManager,
-    /// Current state of the input devices (mouse and keyboard).
+
     pub input_state: InputState<CompositorAppState>,
-    /// The name of the socket that the compositor is binded to.
-    pub wayland_socket_name: Option<OsString>,
-    /// When this compositor session has began.
-    pub start_time: std::time::Instant,
+    pub shortcuts: ShortcutsComponent,
+    pub layout_manager: LayoutManager,
 }
 
 impl CompositorAppState {
-    /// Processes shortcuts from the current input state.
-    pub fn process_shortcuts(&mut self) {
-        let terminal_shortcut_keycodes = vec![KeyCode::new(50), KeyCode::new(28)];
-        println!("Terminal shortcut keycodes: {terminal_shortcut_keycodes:?}");
-
-        let is_terminal_shortcut_pressed = self
-            .input_state
-            .is_keyboard_combination_pressed(terminal_shortcut_keycodes);
-        println!("Is terminal shotcut pressed: {is_terminal_shortcut_pressed:?}");
-        if is_terminal_shortcut_pressed {
-            let Some(socket_name) = &self.wayland_socket_name else {
-                log::error!("cannot spawn terminal: WAYLAND_DISPLAY socket name is missing");
-                return;
-            };
-            let _ = std::process::Command::new("ghostty")
-                .env("WAYLAND_DISPLAY", socket_name)
-                .spawn();
-        }
-    }
-
     /// Requests redrawing from the rendering backend.
     pub fn request_redraw(&mut self) {
         if let Some(backend) = self.backend.as_mut() {
             backend.request_redraw();
         }
-    }
-
-    pub fn surface_under_location(
-        &self,
-        location: Point<f64, Logical>,
-    ) -> Option<(WlSurface, Point<f64, Logical>)> {
-        let (window, window_location) = self.space.element_under(location)?;
-        let relative_to_window = location - window_location.to_f64();
-        let surface = window.surface_under(relative_to_window, WindowSurfaceType::ALL);
-        surface.map(|(surface, surface_location)| (surface, surface_location.to_f64()))
     }
 }
 
@@ -125,33 +89,7 @@ impl CompositorHandler for CompositorAppState {
         // rendered afterwards by the renderer backend.
         on_commit_buffer_handler::<Self>(surface);
 
-        let mut needs_redraw = false;
-        for window in self.space.elements() {
-            let is_this_window = window
-                .toplevel()
-                .map(|toplevel| toplevel.wl_surface() == surface)
-                .unwrap_or(false);
-            if !is_this_window {
-                continue;
-            }
-            window.on_commit();
-            let initial_configure_sent = with_states(surface, |states| {
-                states
-                    .data_map
-                    .get::<XdgToplevelSurfaceData>()
-                    .unwrap()
-                    .lock()
-                    .unwrap()
-                    .initial_configure_sent
-            });
-            if !initial_configure_sent {
-                window.toplevel().unwrap().send_pending_configure();
-            }
-
-            needs_redraw = true;
-            break;
-        }
-        if needs_redraw {
+        if self.layout_manager.window_needs_commit_redraw(surface) {
             self.request_redraw();
         }
     }
@@ -163,18 +101,12 @@ impl XdgShellHandler for CompositorAppState {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        surface.with_pending_state(|state| {
-            state.size = Some((1000, 1000).into());
-        });
-        surface.send_configure();
-
-        let window = Window::new_wayland_window(surface);
-        self.space.map_element(window, (0, 0), false);
+        self.layout_manager.spawn_client_window(surface);
         self.request_redraw();
     }
 
-    fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
-        let _ = self.popups.track_popup(PopupKind::Xdg(surface));
+    fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        self.layout_manager.track_window_popup(surface, positioner);
         self.request_redraw();
     }
 
@@ -192,12 +124,7 @@ impl XdgShellHandler for CompositorAppState {
         positioner: PositionerState,
         token: u32,
     ) {
-        surface.with_pending_state(|state| {
-            let geometry = positioner.get_geometry();
-            state.geometry = geometry;
-            state.positioner = positioner;
-        });
-        surface.send_repositioned(token);
+        self.layout_manager.reposition(surface, positioner, token);
         self.request_redraw();
     }
 }
@@ -263,32 +190,47 @@ impl CompositorApp {
     /// Creates a new instance of the compositor state, acquiring Wayland state.
     pub fn new(display: Display<CompositorAppState>) -> anyhow::Result<Self> {
         let display_handle = display.handle();
-        let compositor_state = CompositorState::new::<CompositorAppState>(&display_handle);
+
         let xdg_shell_state = XdgShellState::new::<CompositorAppState>(&display_handle);
+        let compositor_state = CompositorState::new::<CompositorAppState>(&display_handle);
+        let mut seat_state = SeatState::<CompositorAppState>::new();
         let shm_state = ShmState::new::<CompositorAppState>(&display_handle, vec![]);
         let data_device_state = DataDeviceState::new::<CompositorAppState>(&display_handle);
 
         let event_loop = EventLoop::<CompositorAppState>::try_new()?;
         let loop_signal = event_loop.get_signal();
 
-        // TODO(input): Move seat into the [InputState].
-        let mut seat_state = SeatState::<CompositorAppState>::new();
         let input_state = InputState::new(&display_handle, &mut seat_state);
+        let mut shortcuts = ShortcutsComponent::default();
+        shortcuts.register(RegisteredShortcut {
+            modifiers: KeyboardModifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+            keysyms: vec![keysyms::KEY_t],
+            action: ShortcutAction::Command("ghostty".to_owned()),
+        });
+        shortcuts.register(RegisteredShortcut {
+            modifiers: KeyboardModifiers {
+                shift: true,
+                ..Default::default()
+            },
+            keysyms: vec![keysyms::KEY_b],
+            action: ShortcutAction::Command("helium-browser".to_owned()),
+        });
 
+        let layout_manager = LayoutManager::new(display_handle);
         let state = CompositorAppState {
-            compositor_state,
-            display_handle,
-            backend: None,
-            loop_signal,
             xdg_shell_state,
-            space: Space::default(),
-            popups: PopupManager::default(),
+            compositor_state,
             seat_state,
-            input_state,
-            wayland_socket_name: None,
-            start_time: std::time::Instant::now(),
             shm_state,
             data_device_state,
+            backend: None,
+            loop_signal,
+            input_state,
+            shortcuts,
+            layout_manager,
         };
 
         Ok(Self {
@@ -309,7 +251,6 @@ impl CompositorApp {
             std::env::set_var("WAYLAND_DISPLAY", socket_name);
         }
 
-        self.state.wayland_socket_name = Some(socket_name.to_os_string());
         self.wayland_socket = Some(wayland_socket);
         Ok(())
     }
@@ -329,10 +270,7 @@ impl CompositorApp {
 
         // Adding new clients into the display.
         loop_handle.insert_source(listener, move |stream, _, state| {
-            state
-                .display_handle
-                .insert_client(stream, Arc::new(ClientState::default()))
-                .expect("failed to insert new client");
+            state.layout_manager.insert_new_client(stream);
         })?;
 
         // Adding the display itself, so new events can be processed.

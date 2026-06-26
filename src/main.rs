@@ -3,6 +3,9 @@ pub mod client;
 pub mod compositor;
 pub mod input_state;
 
+pub mod layout;
+pub mod shortcut;
+
 use wayland_server::Display;
 
 use crate::{backend::winit::WinitBackend, compositor::CompositorApp};

@@ -1,9 +1,9 @@
 //! Implements rendering backend, backed by winit.
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::{cell::RefCell, rc::Rc};
 
 use smithay::{
     backend::{
-        input::{AbsolutePositionEvent, Event, KeyboardKeyEvent},
+        input::{AbsolutePositionEvent, Event, KeyboardKeyEvent, PointerButtonEvent},
         renderer::{
             Color32F, damage::OutputDamageTracker, element::surface::WaylandSurfaceRenderElement,
             gles::GlesRenderer,
@@ -93,7 +93,8 @@ impl Backend for WinitBackend {
         log::info!("Target refresh_rate: {refresh_rate:?}, monitor size: {monitor_size:?}");
         log::info!("Target window size: {:?}", renderer.backend.window_size());
 
-        let global_id = output.create_global::<CompositorAppState>(&app_state.display_handle);
+        let global_id =
+            output.create_global::<CompositorAppState>(&app_state.layout_manager.display_handle);
         self.global_id = Some(global_id);
 
         // Update output's mode for future drawing requests.
@@ -104,7 +105,7 @@ impl Backend for WinitBackend {
             Some((0, 0).into()),
         );
         output.set_preferred(mode);
-        app_state.space.map_output(&output, (0, 0));
+        app_state.layout_manager.map_output(&output);
 
         renderer.damage_tracker = Some(OutputDamageTracker::from_output(&output));
         renderer.output = Some(output);
@@ -166,13 +167,13 @@ impl Backend for WinitBackend {
                                 &mut framebuffer,
                                 1.0,            // Opacity for the drawn texture.
                                 0,              // How old the buffer is.
-                                [&state.space], // Space to draw the window in.
+                                [state.layout_manager.get_active_space()], // Space to draw the window in.
                                 &[],            // Cursors, decorations, and so on.
                                 damage_tracker,
                                 Color32F::new(0.0, 0.0, 0.0, 1.0), // Background color used to clear out the output.
                             );
                             match render_result {
-                                Ok(..) => log::debug!("Successfully rendered the output"),
+                                Ok(_) => log::debug!("Successfully rendered the output"),
                                 Err(e) => log::error!("Failed to render the output: {e:?}"),
                             }
                         }
@@ -181,18 +182,8 @@ impl Backend for WinitBackend {
                             log::error!("Failed to submit damage to the backend renderer: {e:?}");
                         }
 
-                        state.space.elements().for_each(|window| {
-                            window.send_frame(
-                                output,
-                                state.start_time.elapsed(),
-                                Some(Duration::ZERO),
-                                |_, _| Some(output.clone()),
-                            );
-                        });
-
-                        state.space.refresh();
-                        state.popups.cleanup();
-                        if let Err(e) = state.display_handle.flush_clients() {
+                        state.layout_manager.refresh_frame(output);
+                        if let Err(e) = state.layout_manager.display_handle.flush_clients() {
                             log::error!("Failed to flush display clients: {e:?}");
                         }
 
@@ -201,15 +192,22 @@ impl Backend for WinitBackend {
                     winit::WinitEvent::Input(input) => {
                         match input {
                             smithay::backend::input::InputEvent::Keyboard { event } => {
-                                match event.state() {
-                                    smithay::backend::input::KeyState::Released => {
-                                        state.input_state.on_keyboard_key_release(event.key_code());
-                                    }
-                                    smithay::backend::input::KeyState::Pressed => {
-                                        state.input_state.on_keyboard_key_press(event.key_code());
-                                    }
-                                }
-                                state.process_shortcuts();
+                                match state.input_state.keyboard_handle_for_device(event.device()) {
+                                    Ok(handle) => {
+                                        handle.input(state, event.key_code(), event.state(), SERIAL_COUNTER.next_serial(), event.time_msec(), |state, modifiers, keysym_handle| {
+                                            let shortcut = state.shortcuts.shortcut_for_keystroke(modifiers.into(), keysym_handle.raw_syms());
+                                            if let Some(shortcut) = shortcut {
+                                                if let Err(e) = shortcut.execute() {
+                                                    log::error!("Failed to process the shortcut: {e:?}");
+                                                }
+                                                smithay::input::keyboard::FilterResult::<()>::Intercept(())
+                                            } else {
+                                                smithay::input::keyboard::FilterResult::<()>::Forward
+                                            }
+                                        });
+                                    },
+                                    Err(e) => log::error!("Failed to acquire keyboard handle for device: {e:?}"),
+                                };
                             }
                             smithay::backend::input::InputEvent::DeviceAdded { device } => {
                                 if let Err(e) = state.input_state.on_device_added(device) {
@@ -224,28 +222,40 @@ impl Backend for WinitBackend {
                             } => {
                                 let output_size = renderer_inner.borrow().backend.window_size().to_logical(1);
                                 let location = event.position_transformed(output_size);
-                                let surface_underneath = state.surface_under_location(location);
+                                let surface_underneath = state.layout_manager.current_workspace().surface_under_location(location);
 
                                 match state.input_state.pointer_handle_for_device(event.device()) {
-                                    Ok(pointer) => {
+                                    Ok(handle) => {
                                         let event = MotionEvent {
                                             location,
                                             serial: SERIAL_COUNTER.next_serial(),
                                             time: event.time_msec(),
                                         };
-                                        pointer.motion(state, surface_underneath, &event);
+                                        handle.motion(state, surface_underneath, &event);
                                     },
-                                    Err(e) => log::error!("Failed acquire pointer handle for the device: {e:?}"),
+                                    Err(e) => log::error!("Failed acquire pointer handle for device: {e:?}"),
                                 };
+
+                                state.request_redraw();
                             },
-                            // smithay::backend::input::InputEvent::PointerButton { event } => todo!(),
+                            smithay::backend::input::InputEvent::PointerButton { event } => {
+                                if let Some(mouse_button) = event.button() {
+                                    match mouse_button {
+                                        smithay::backend::input::MouseButton::Left => todo!(),
+                                        smithay::backend::input::MouseButton::Middle => todo!(),
+                                        smithay::backend::input::MouseButton::Right => todo!(),
+                                        smithay::backend::input::MouseButton::Back => todo!(),
+                                        smithay::backend::input::MouseButton::Forward => todo!(),
+                                        _ => todo!(),
+                                    }
+                                }
+                            },
                             // smithay::backend::input::InputEvent::PointerAxis { event } => todo!(),
                             event => log::debug!("Received input event from winit: {event:?}"),
                         }
                     }
                     winit::WinitEvent::CloseRequested => state.loop_signal.stop(),
                     winit::WinitEvent::Focus(is_focused) => {
-                        state.input_state.clear_keyboard_keys();
                         log::info!("Focus state changed to: is_focused={is_focused}");
                     }
                     _ => {}

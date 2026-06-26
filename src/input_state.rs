@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use smithay::{
     backend::input::{Device, DeviceCapability},
@@ -6,7 +6,6 @@ use smithay::{
     wayland::seat::{SeatGlobalData, WaylandFocus},
 };
 use wayland_server::{DisplayHandle, GlobalDispatch, protocol::wl_seat::WlSeat};
-use xkeysym::KeyCode;
 
 #[derive(PartialEq, Eq)]
 pub enum KnownDeviceType {
@@ -23,7 +22,6 @@ pub struct KnownDevice<S: SeatHandler> {
 pub struct InputState<S: SeatHandler> {
     seat: Seat<S>,
     known_devices: HashMap<String, KnownDevice<S>>,
-    active_keyboard_keys: HashSet<KeyCode>,
 }
 
 impl<S> InputState<S>
@@ -34,12 +32,9 @@ where
     S: GlobalDispatch<WlSeat, SeatGlobalData<S>>,
 {
     pub fn new(display_handle: &DisplayHandle, seat_state: &mut SeatState<S>) -> Self {
-        let seat = seat_state.new_wl_seat(&display_handle, "seat-0");
-
         Self {
-            seat,
+            seat: seat_state.new_wl_seat(&display_handle, "seat-0"),
             known_devices: HashMap::default(),
-            active_keyboard_keys: HashSet::default(),
         }
     }
 
@@ -82,29 +77,18 @@ where
         }
     }
 
-    // TODO(keystrokes): Maybe we should check for the keyboard too?
-    pub fn on_keyboard_key_press(&mut self, key: KeyCode) {
-        self.active_keyboard_keys.insert(key);
-    }
-
-    pub fn on_keyboard_key_release(&mut self, key: KeyCode) {
-        self.active_keyboard_keys.remove(&key);
-    }
-
-    pub fn clear_keyboard_keys(&mut self) {
-        self.active_keyboard_keys.clear();
-    }
-
-    pub fn is_keyboard_combination_pressed(&self, combination: Vec<KeyCode>) -> bool {
-        println!("Active keyboard keys: {:?}", self.active_keyboard_keys);
-
-        let mut is_pressed = true;
-        for key in combination {
-            if !self.active_keyboard_keys.contains(&key) {
-                is_pressed = false;
-                break;
-            }
+    pub fn keyboard_handle_for_device<D: Device>(
+        &self,
+        device: D,
+    ) -> anyhow::Result<KeyboardHandle<S>> {
+        let known_device = self
+            .known_devices
+            .get(&device.id())
+            .ok_or(anyhow::anyhow!("device is not registered"))?;
+        if let Some(keyboard_handle) = &known_device.keyboard_handle {
+            return Ok(keyboard_handle.clone());
+        } else {
+            anyhow::bail!("given device is not a keyboard")
         }
-        return is_pressed;
     }
 }
