@@ -25,8 +25,16 @@ impl Workspace {
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
         let (window, window_location) = self.space.element_under(location)?;
         let relative_to_window = location - window_location.to_f64();
-        let surface = window.surface_under(relative_to_window, WindowSurfaceType::ALL);
-        surface.map(|(surface, surface_location)| (surface, surface_location.to_f64()))
+        let (surface, surface_location) =
+            window.surface_under(relative_to_window, WindowSurfaceType::ALL)?;
+        Some((
+            surface,
+            window_location.to_f64() + surface_location.to_f64(),
+        ))
+    }
+
+    pub fn window_under_location(&self, location: Point<f64, Logical>) -> Option<&Window> {
+        self.space.element_under(location).map(|(window, _)| window)
     }
 
     pub fn next_layout_size(&self) -> Option<Size<i32, Logical>> {
@@ -57,6 +65,8 @@ pub struct LayoutManager {
     popups: PopupManager,
     pub display_handle: DisplayHandle,
     start_time: std::time::Instant,
+
+    pub active_window: Option<Window>,
 }
 
 impl LayoutManager {
@@ -67,6 +77,7 @@ impl LayoutManager {
             popups: PopupManager::default(),
             display_handle,
             start_time: std::time::Instant::now(),
+            active_window: None,
         }
     }
 

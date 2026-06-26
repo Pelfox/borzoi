@@ -10,7 +10,8 @@ use smithay::{
         },
         winit::{self, WinitEventLoop, WinitGraphicsBackend},
     },
-    input::pointer::MotionEvent,
+    desktop::space::SpaceElement,
+    input::pointer::{ButtonEvent, MotionEvent},
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{calloop::LoopHandle, winit::dpi::PhysicalSize},
     utils::{Physical, Rectangle, SERIAL_COUNTER, Size, Transform},
@@ -238,15 +239,58 @@ impl Backend for WinitBackend {
 
                                 state.request_redraw();
                             },
+                            smithay::backend::input::InputEvent::PointerAxis { event } => {
+                                todo!()
+                            },
                             smithay::backend::input::InputEvent::PointerButton { event } => {
                                 if let Some(mouse_button) = event.button() {
                                     match mouse_button {
-                                        smithay::backend::input::MouseButton::Left => todo!(),
-                                        smithay::backend::input::MouseButton::Middle => todo!(),
+                                        smithay::backend::input::MouseButton::Left => {
+                                            match state.input_state.pointer_handle_for_device(event.device()) {
+                                                Ok(handle) => {
+                                                    let underlying_window = state.layout_manager.current_workspace().window_under_location(handle.current_location());
+                                                    if let Some(underlying_window) = underlying_window {
+                                                        let mut should_activate_window = false;
+
+                                                        if let Some(ref window) = state.layout_manager.active_window {
+                                                            if underlying_window != window {
+                                                                should_activate_window = true;
+                                                            }
+                                                        } else {
+                                                            should_activate_window = true;
+                                                        }
+
+                                                        if should_activate_window {
+                                                            println!("Activating window: {underlying_window:?}");
+                                                            underlying_window.set_activate(true);
+                                                            state.layout_manager.active_window = Some(underlying_window.clone());
+                                                        }
+                                                    }
+
+                                                    handle.button(state, &ButtonEvent{
+                                                        serial: SERIAL_COUNTER.next_serial(),
+                                                        time: event.time_msec(),
+                                                        button: event.button_code(),
+                                                        state: event.state(),
+                                                    });
+                                                },
+                                                Err(e) => log::error!("Failed acquire pointer handle for device: {e:?}"),
+                                            }
+                                        },
                                         smithay::backend::input::MouseButton::Right => todo!(),
-                                        smithay::backend::input::MouseButton::Back => todo!(),
-                                        smithay::backend::input::MouseButton::Forward => todo!(),
-                                        _ => todo!(),
+                                        _ => {
+                                            match state.input_state.pointer_handle_for_device(event.device()) {
+                                                Ok(handle) => {
+                                                    handle.button(state, &ButtonEvent{
+                                                        serial: SERIAL_COUNTER.next_serial(),
+                                                        time: event.time_msec(),
+                                                        button: event.button_code(),
+                                                        state: event.state(),
+                                                    });
+                                                }
+                                                Err(e) => log::error!("Failed acquire pointer handle for device: {e:?}"),
+                                            };
+                                        },
                                     }
                                 }
                             },
