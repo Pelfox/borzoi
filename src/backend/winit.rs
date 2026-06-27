@@ -3,7 +3,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use smithay::{
     backend::{
-        input::{AbsolutePositionEvent, Event, KeyboardKeyEvent, PointerButtonEvent},
+        input::{AbsolutePositionEvent, Event, KeyState, KeyboardKeyEvent, PointerButtonEvent},
         renderer::{
             Color32F, damage::OutputDamageTracker, element::surface::WaylandSurfaceRenderElement,
             gles::GlesRenderer,
@@ -195,7 +195,7 @@ impl Backend for WinitBackend {
                                     Ok(handle) => {
                                         handle.input(state, event.key_code(), event.state(), SERIAL_COUNTER.next_serial(), event.time_msec(), |state, modifiers, keysym_handle| {
                                             let shortcut = state.shortcuts.shortcut_for_keystroke(modifiers.into(), keysym_handle.raw_syms());
-                                            if let Some(shortcut) = shortcut {
+                                            if let Some(shortcut) = shortcut && event.state() == KeyState::Pressed {
                                                 if let Err(e) = shortcut.execute() {
                                                     log::error!("Failed to process the shortcut: {e:?}");
                                                 }

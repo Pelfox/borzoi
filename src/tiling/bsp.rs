@@ -126,8 +126,32 @@ fn calculate_placements(
     }
 }
 
+/// Checks whether the given window ID is present in the tree, starting from
+/// the root node.
+fn is_window_in_tree(root: &WindowNode, target_window_id: &WindowId) -> bool {
+    match root {
+        WindowNode::Leaf { window_id } => window_id == target_window_id,
+        WindowNode::Split { left, right, .. } => {
+            if is_window_in_tree(left, target_window_id) {
+                return true;
+            }
+            if is_window_in_tree(right, target_window_id) {
+                return true;
+            }
+            false
+        }
+    }
+}
+
 impl TilingMode for BspTilingMode {
     fn accept_window(&mut self, window_id: &WindowId, active_window_id: Option<WindowId>) {
+        // Disallow the same window from being registered multiple times.
+        if let Some(ref root) = self.root
+            && is_window_in_tree(&root, window_id)
+        {
+            return;
+        }
+
         match self.root.as_mut() {
             // If there is already an existing root node, we are splitting it
             // with the new one - for new window.

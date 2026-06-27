@@ -21,6 +21,7 @@ type ScreenSize = Size<i32, Logical>;
 
 pub struct Workspace {
     space: Space<Window>,
+    windows: Vec<Window>,
     active_window: Option<Window>,
 }
 
@@ -28,6 +29,7 @@ impl Workspace {
     pub fn new() -> Self {
         Self {
             space: Space::default(),
+            windows: Vec::new(),
             active_window: None,
         }
     }
@@ -54,11 +56,19 @@ impl Workspace {
         // TODO: We should calculate parent's position and insert this floating
         // window (which is, in our model, a popup/dialog) at the center of the
         // parent.
-        println!("New floating window");
         self.space.map_element(window.clone(), (0, 0), true);
+        self.windows.push(window.clone());
+        self.active_window = Some(window);
     }
 
     fn get_window_by_id(&self, window_id: &WindowId) -> Option<&Window> {
+        for window in &self.windows {
+            if let Some(surface) = window.wl_surface() {
+                if &surface.id() == window_id {
+                    return Some(window);
+                }
+            }
+        }
         for element in self.space.elements() {
             if let Some(surface) = element.wl_surface() {
                 if &surface.id() == window_id {
@@ -70,8 +80,8 @@ impl Workspace {
     }
 
     pub fn accept_new_tiling_window(&mut self, window: Window, placements: &Vec<WindowPlacement>) {
-        println!("New tiling window");
-        self.space.map_element(window.clone(), (0, 0), true);
+        self.windows.push(window.clone());
+        self.active_window = Some(window);
 
         for placement in placements {
             if let Some(placement_window) = self.get_window_by_id(&placement.window_id) {
@@ -202,11 +212,10 @@ impl LayoutManager {
             }
         };
 
-        self.tiling_mode
-            .accept_window(&new_window_id, active_window_id);
-
         if let Some(toplevel) = window.toplevel() {
             if !toplevel.parent().is_some() {
+                self.tiling_mode
+                    .accept_window(&new_window_id, active_window_id);
                 let mut placements = Vec::new();
                 self.tiling_mode
                     .calculate_placements(&screen_rect, &mut placements);
