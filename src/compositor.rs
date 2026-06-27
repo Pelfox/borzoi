@@ -31,7 +31,10 @@ pub struct CompositorApp {
 
 impl CompositorApp {
     /// Creates a new instance of the compositor state, acquiring Wayland state.
-    pub fn new(display: Display<CompositorAppState>) -> anyhow::Result<Self> {
+    pub fn new<B>(display: Display<CompositorAppState>, mut backend: B) -> anyhow::Result<Self>
+    where
+        B: Backend + 'static,
+    {
         let display_handle = display.handle();
 
         let event_loop = EventLoop::<CompositorAppState>::try_new()?;
@@ -55,9 +58,11 @@ impl CompositorApp {
             action: ShortcutAction::Command("helium-browser".to_owned()),
         });
 
-        let layout_manager = LayoutManager::new(display_handle.clone());
-        let state =
+        let layout_manager = LayoutManager::new(display_handle.clone(), backend.output_size());
+        let mut state =
             CompositorAppState::new(&display_handle, loop_signal, shortcuts, layout_manager);
+        backend.init_renderer(&mut state)?;
+        state.backend = Some(Box::new(backend));
 
         Ok(Self {
             display: Some(display),
@@ -114,20 +119,12 @@ impl CompositorApp {
         Ok(())
     }
 
-    /// Registers the provided backend to use for compositing windows.
-    pub fn register_backend<B>(&mut self, mut backend: B) -> anyhow::Result<()>
-    where
-        B: Backend + 'static,
-    {
-        backend.init_renderer(&mut self.state)?;
-        backend.process_events()?;
-        self.state.backend = Some(Box::new(backend));
-        Ok(())
-    }
-
     /// Blocks the main thread of the compositor and starts event processing
     /// from clients.
     pub fn run_event_loop(mut self) -> anyhow::Result<()> {
+        if let Some(backend) = &mut self.state.backend {
+            backend.process_events(self.event_loop.handle())?
+        }
         self.event_loop.run(None, &mut self.state, move |_| {})?;
         Ok(())
     }

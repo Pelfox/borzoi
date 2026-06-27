@@ -6,19 +6,32 @@ use smithay::{
     utils::{Logical, Point, Size},
     wayland::{
         compositor::with_states,
+        seat::WaylandFocus,
         shell::xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgToplevelSurfaceData},
     },
 };
-use wayland_server::{DisplayHandle, protocol::wl_surface::WlSurface};
+use wayland_server::{DisplayHandle, Resource, protocol::wl_surface::WlSurface};
 
-use crate::client::ClientState;
+use crate::{
+    client::ClientState,
+    tiling::{TilingMode, WindowId, WindowPlacement, WindowRect, bsp::BspTilingMode},
+};
 
-#[derive(Default)]
+type ScreenSize = Size<i32, Logical>;
+
 pub struct Workspace {
     space: Space<Window>,
+    active_window: Option<Window>,
 }
 
 impl Workspace {
+    pub fn new() -> Self {
+        Self {
+            space: Space::default(),
+            active_window: None,
+        }
+    }
+
     pub fn surface_under_location(
         &self,
         location: Point<f64, Logical>,
@@ -37,25 +50,44 @@ impl Workspace {
         self.space.element_under(location).map(|(window, _)| window)
     }
 
-    pub fn next_layout_size(&self) -> Option<Size<i32, Logical>> {
-        Some((1000, 1000).into())
+    pub fn accept_new_floating_window(&mut self, window: Window) {
+        // TODO: We should calculate parent's position and insert this floating
+        // window (which is, in our model, a popup/dialog) at the center of the
+        // parent.
+        println!("New floating window");
+        self.space.map_element(window.clone(), (0, 0), true);
     }
 
-    pub fn next_layout_point(&self) -> Point<i32, Logical> {
-        let mut x = 0;
+    fn get_window_by_id(&self, window_id: &WindowId) -> Option<&Window> {
         for element in self.space.elements() {
-            let size = element.geometry().size;
-            if size.w == 0 && size.h == 0 {
-                continue;
+            if let Some(surface) = element.wl_surface() {
+                if &surface.id() == window_id {
+                    return Some(element);
+                }
             }
-            x += size.w;
         }
-        (x, 0).into()
+        None
     }
 
-    pub fn accept_new_window(&mut self, window: Window) {
-        let window_spawn_point = self.next_layout_point();
-        self.space.map_element(window, window_spawn_point, true);
+    pub fn accept_new_tiling_window(&mut self, window: Window, placements: &Vec<WindowPlacement>) {
+        println!("New tiling window");
+        self.space.map_element(window.clone(), (0, 0), true);
+
+        for placement in placements {
+            if let Some(placement_window) = self.get_window_by_id(&placement.window_id) {
+                if let Some(toplevel_surface) = placement_window.toplevel() {
+                    toplevel_surface.with_pending_state(|state| {
+                        state.size = Some((placement.rect.width, placement.rect.height).into());
+                    });
+                    toplevel_surface.send_configure();
+                }
+                self.space.map_element(
+                    placement_window.clone(),
+                    (placement.rect.x, placement.rect.y),
+                    true,
+                );
+            }
+        }
     }
 }
 
@@ -64,20 +96,22 @@ pub struct LayoutManager {
     active_workspace_id: usize,
     popups: PopupManager,
     start_time: std::time::Instant,
+    screen_size: ScreenSize,
 
     pub display_handle: DisplayHandle,
-    pub active_window: Option<Window>,
+    tiling_mode: Box<dyn TilingMode>,
 }
 
 impl LayoutManager {
-    pub fn new(display_handle: DisplayHandle) -> Self {
+    pub fn new(display_handle: DisplayHandle, screen_size: ScreenSize) -> Self {
         Self {
-            workspaces: vec![Workspace::default()],
+            workspaces: vec![Workspace::new()],
             active_workspace_id: 0,
             popups: PopupManager::default(),
             start_time: std::time::Instant::now(),
+            screen_size,
             display_handle,
-            active_window: None,
+            tiling_mode: Box::new(BspTilingMode::default()), // TODO
         }
     }
 
@@ -87,6 +121,14 @@ impl LayoutManager {
 
     pub fn current_workspace_mut(&mut self) -> &mut Workspace {
         &mut self.workspaces[self.active_workspace_id]
+    }
+
+    pub fn active_window(&self) -> &Option<Window> {
+        &self.current_workspace().active_window
+    }
+
+    pub fn set_active_window(&mut self, window: Window) {
+        self.current_workspace_mut().active_window = Some(window);
     }
 
     pub fn insert_new_client(&mut self, stream: UnixStream) {
@@ -127,12 +169,55 @@ impl LayoutManager {
     }
 
     pub fn spawn_client_window(&mut self, surface: ToplevelSurface) {
-        let active_workspace = self.current_workspace_mut();
-        surface.with_pending_state(|state| state.size = active_workspace.next_layout_size());
         surface.send_configure();
 
+        let screen_rect = WindowRect {
+            x: 0,
+            y: 0,
+            width: self.screen_size.w,
+            height: self.screen_size.h,
+        };
         let window = Window::new_wayland_window(surface);
-        active_workspace.accept_new_window(window);
+
+        let new_window_id: WindowId;
+        if let Some(wl_surface) = window.wl_surface() {
+            new_window_id = wl_surface.id();
+        } else {
+            self.current_workspace_mut()
+                .accept_new_floating_window(window);
+            return;
+        }
+
+        let active_window_id = {
+            let active_workspace = self.current_workspace_mut();
+            match active_workspace.active_window {
+                Some(ref active_window) => {
+                    if let Some(surface) = active_window.wl_surface() {
+                        Some(surface.id())
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            }
+        };
+
+        self.tiling_mode
+            .accept_window(&new_window_id, active_window_id);
+
+        if let Some(toplevel) = window.toplevel() {
+            if !toplevel.parent().is_some() {
+                let mut placements = Vec::new();
+                self.tiling_mode
+                    .calculate_placements(&screen_rect, &mut placements);
+                self.current_workspace_mut()
+                    .accept_new_tiling_window(window, &placements);
+                return;
+            }
+        }
+
+        self.current_workspace_mut()
+            .accept_new_floating_window(window);
     }
 
     pub fn track_window_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {

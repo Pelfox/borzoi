@@ -14,7 +14,7 @@ use smithay::{
     input::pointer::{ButtonEvent, MotionEvent},
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{calloop::LoopHandle, winit::dpi::PhysicalSize},
-    utils::{Physical, Rectangle, SERIAL_COUNTER, Size, Transform},
+    utils::{Logical, Rectangle, SERIAL_COUNTER, Size, Transform},
 };
 use wayland_server::backend::GlobalId;
 
@@ -34,8 +34,6 @@ struct WinitBackendRenderer {
 pub struct WinitBackend {
     /// Holds winit's lifecycle-bound event loop.
     winit_event_loop: Option<WinitEventLoop>,
-    /// Holds compositor main event loop's handle.
-    event_loop_handle: LoopHandle<'static, CompositorAppState>,
     /// Holds an ID of the created winit window.
     global_id: Option<GlobalId>,
     /// References a shared backend renderer.
@@ -44,9 +42,7 @@ pub struct WinitBackend {
 
 impl WinitBackend {
     /// Creates a new rendering backend, backed by winit.
-    pub fn new(
-        event_loop_handle: LoopHandle<'static, CompositorAppState>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let (backend, winit_event_loop) = winit::init::<GlesRenderer>()?;
         let renderer = WinitBackendRenderer {
             backend,
@@ -55,7 +51,6 @@ impl WinitBackend {
         };
         Ok(Self {
             winit_event_loop: Some(winit_event_loop),
-            event_loop_handle,
             global_id: None,
             renderer: Rc::new(RefCell::new(renderer)),
         })
@@ -63,8 +58,8 @@ impl WinitBackend {
 }
 
 impl Backend for WinitBackend {
-    fn output_size(&self) -> Size<i32, Physical> {
-        self.renderer.borrow().backend.window_size()
+    fn output_size(&self) -> Size<i32, Logical> {
+        self.renderer.borrow().backend.window_size().to_logical(1) // TODO
     }
 
     fn init_renderer(&mut self, app_state: &mut CompositorAppState) -> anyhow::Result<()> {
@@ -114,14 +109,17 @@ impl Backend for WinitBackend {
         Ok(())
     }
 
-    fn process_events(&mut self) -> anyhow::Result<()> {
+    fn process_events(
+        &mut self,
+        event_loop_handle: LoopHandle<'static, CompositorAppState>,
+    ) -> anyhow::Result<()> {
         let winit_event_loop = match self.winit_event_loop.take() {
             Some(event_loop) => event_loop,
             None => anyhow::bail!("winit event loop was already registered"),
         };
         let renderer_inner = Rc::clone(&self.renderer);
 
-        self.event_loop_handle
+        event_loop_handle
             .insert_source(winit_event_loop, move |event, _, state| {
                 match event {
                     winit::WinitEvent::Redraw => {
@@ -252,7 +250,7 @@ impl Backend for WinitBackend {
                                                     if let Some(underlying_window) = underlying_window {
                                                         let mut should_activate_window = false;
 
-                                                        if let Some(ref window) = state.layout_manager.active_window {
+                                                        if let Some(window) = state.layout_manager.active_window() {
                                                             if underlying_window != window {
                                                                 should_activate_window = true;
                                                             }
@@ -263,7 +261,7 @@ impl Backend for WinitBackend {
                                                         if should_activate_window {
                                                             println!("Activating window: {underlying_window:?}");
                                                             underlying_window.set_activate(true);
-                                                            state.layout_manager.active_window = Some(underlying_window.clone());
+                                                            state.layout_manager.set_active_window(underlying_window.clone());
                                                         }
                                                     }
 

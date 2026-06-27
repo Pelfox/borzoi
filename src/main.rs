@@ -6,6 +6,7 @@ pub mod state;
 
 pub mod layout;
 pub mod shortcut;
+pub mod tiling;
 
 use wayland_server::Display;
 
@@ -15,12 +16,11 @@ fn main() -> anyhow::Result<()> {
     pretty_env_logger::init();
 
     let display = Display::new()?;
-    let mut app = CompositorApp::new(display)?;
-    let backend = WinitBackend::new(app.event_loop.handle()).expect("failed to create backend");
+    let backend = WinitBackend::new().expect("failed to create backend");
+    let mut app = CompositorApp::new(display, backend)?;
 
     app.bind_wayland_socket()?;
     app.register_display_event_sources()?;
-    app.register_backend(backend)?;
 
     app.run_event_loop()?;
     Ok(())
