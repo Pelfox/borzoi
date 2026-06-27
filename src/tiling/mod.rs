@@ -4,6 +4,7 @@ pub mod bsp;
 pub type WindowId = wayland_server::backend::ObjectId;
 
 /// Direction of a windows split on workspace update.
+#[derive(Debug, Clone, Copy)]
 pub enum SplitDirection {
     /// Indicates that the existing windows will be splitted vertically.
     Vertical,

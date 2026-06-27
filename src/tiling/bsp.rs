@@ -60,6 +60,13 @@ fn split_rect(rect: &WindowRect, direction: &SplitDirection) -> (WindowRect, Win
     }
 }
 
+fn count_splits(root: &WindowNode) -> i32 {
+    match root {
+        WindowNode::Leaf { .. } => 0,
+        WindowNode::Split { left, right, .. } => count_splits(left) + count_splits(right) + 1,
+    }
+}
+
 /// Splits the current tree of windows at the given one. If root node is
 /// already a split, finds neareast non-splitted window. Updates given root
 /// node, rebuilding the tree. Returned value indicates whether it successfully
@@ -68,6 +75,7 @@ fn split_active_window_leaf(
     root: &mut WindowNode,
     active_window_id: &WindowId,
     new_window_id: &WindowId,
+    direction: SplitDirection,
 ) -> bool {
     match root {
         WindowNode::Leaf { window_id } => {
@@ -76,7 +84,7 @@ fn split_active_window_leaf(
             }
 
             *root = WindowNode::Split {
-                direction: SplitDirection::Vertical,
+                direction,
                 left: Box::new(WindowNode::Leaf {
                     window_id: window_id.clone(),
                 }),
@@ -88,10 +96,10 @@ fn split_active_window_leaf(
             return true;
         }
         WindowNode::Split { left, right, .. } => {
-            if split_active_window_leaf(left, active_window_id, new_window_id) {
+            if split_active_window_leaf(left, active_window_id, new_window_id, direction) {
                 return true;
             }
-            if split_active_window_leaf(right, active_window_id, new_window_id) {
+            if split_active_window_leaf(right, active_window_id, new_window_id, direction) {
                 return true;
             }
             return false;
@@ -156,15 +164,21 @@ impl TilingMode for BspTilingMode {
             // If there is already an existing root node, we are splitting it
             // with the new one - for new window.
             Some(mut root) => {
+                let direction = if count_splits(&root) % 2 == 0 {
+                    SplitDirection::Vertical
+                } else {
+                    SplitDirection::Horizontal
+                };
                 let inserted = match active_window_id {
-                    Some(id) => split_active_window_leaf(&mut root, &id, window_id),
+                    Some(id) => split_active_window_leaf(&mut root, &id, window_id, direction),
                     None => false,
                 };
 
                 if !inserted {
                     let old_root = self.root.take().unwrap();
+
                     self.root = Some(WindowNode::Split {
-                        direction: SplitDirection::Vertical,
+                        direction,
                         left: Box::new(old_root),
                         right: Box::new(WindowNode::Leaf {
                             window_id: window_id.clone(),
