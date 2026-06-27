@@ -63,9 +63,9 @@ pub struct LayoutManager {
     workspaces: Vec<Workspace>,
     active_workspace_id: usize,
     popups: PopupManager,
-    pub display_handle: DisplayHandle,
     start_time: std::time::Instant,
 
+    pub display_handle: DisplayHandle,
     pub active_window: Option<Window>,
 }
 
@@ -75,8 +75,8 @@ impl LayoutManager {
             workspaces: vec![Workspace::default()],
             active_workspace_id: 0,
             popups: PopupManager::default(),
-            display_handle,
             start_time: std::time::Instant::now(),
+            display_handle,
             active_window: None,
         }
     }

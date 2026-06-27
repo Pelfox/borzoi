@@ -2,6 +2,7 @@ pub mod backend;
 pub mod client;
 pub mod compositor;
 pub mod input_state;
+pub mod state;
 
 pub mod layout;
 pub mod shortcut;

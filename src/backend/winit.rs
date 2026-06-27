@@ -18,7 +18,7 @@ use smithay::{
 };
 use wayland_server::backend::GlobalId;
 
-use crate::{backend::Backend, compositor::CompositorAppState};
+use crate::{backend::Backend, state::CompositorAppState};
 
 /// Describes the current state of the backend renderer.
 struct WinitBackendRenderer {
