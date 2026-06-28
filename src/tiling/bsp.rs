@@ -1,5 +1,6 @@
-use crate::tiling::{
-    SplitDirection, TilingMode, WindowId, WindowNode, WindowPlacement, WindowRect,
+use crate::{
+    tiling::{SplitDirection, TilingMode, WindowNode},
+    window::{WindowId, WindowPlacement, WindowRect},
 };
 
 /// Implements BSP algorithm as one of the available tiling modes, representing
@@ -93,7 +94,7 @@ fn split_active_window_leaf(
                 }),
             };
 
-            return true;
+            true
         }
         WindowNode::Split { left, right, .. } => {
             if split_active_window_leaf(left, active_window_id, new_window_id, direction) {
@@ -102,7 +103,7 @@ fn split_active_window_leaf(
             if split_active_window_leaf(right, active_window_id, new_window_id, direction) {
                 return true;
             }
-            return false;
+            false
         }
     }
 }
@@ -155,7 +156,7 @@ impl TilingMode for BspTilingMode {
     fn accept_window(&mut self, window_id: &WindowId, active_window_id: Option<WindowId>) {
         // Disallow the same window from being registered multiple times.
         if let Some(ref root) = self.root
-            && is_window_in_tree(&root, window_id)
+            && is_window_in_tree(root, window_id)
         {
             return;
         }
@@ -163,14 +164,14 @@ impl TilingMode for BspTilingMode {
         match self.root.as_mut() {
             // If there is already an existing root node, we are splitting it
             // with the new one - for new window.
-            Some(mut root) => {
-                let direction = if count_splits(&root) % 2 == 0 {
+            Some(root) => {
+                let direction = if count_splits(root) % 2 == 0 {
                     SplitDirection::Vertical
                 } else {
                     SplitDirection::Horizontal
                 };
                 let inserted = match active_window_id {
-                    Some(id) => split_active_window_leaf(&mut root, &id, window_id, direction),
+                    Some(id) => split_active_window_leaf(root, &id, window_id, direction),
                     None => false,
                 };
 

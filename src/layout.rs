@@ -1,7 +1,7 @@
 use std::{os::unix::net::UnixStream, sync::Arc};
 
 use smithay::{
-    desktop::{PopupKind, PopupManager, Space, Window, WindowSurfaceType},
+    desktop::{PopupKind, PopupManager, Space, WindowSurfaceType},
     output::Output,
     utils::{Logical, Point, Size},
     wayland::{
@@ -14,13 +14,14 @@ use wayland_server::{DisplayHandle, Resource, protocol::wl_surface::WlSurface};
 
 use crate::{
     client::ClientState,
-    tiling::{TilingMode, WindowId, WindowPlacement, WindowRect, bsp::BspTilingMode},
+    tiling::{TilingMode, bsp::BspTilingMode},
+    window::{Window, WindowId, WindowPlacement, WindowRect},
 };
 
 type ScreenSize = Size<i32, Logical>;
 
 pub struct Workspace {
-    space: Space<Window>,
+    space: Space<smithay::desktop::Window>,
     windows: Vec<Window>,
     active_window: Option<Window>,
 }
@@ -49,54 +50,55 @@ impl Workspace {
     }
 
     pub fn window_under_location(&self, location: Point<f64, Logical>) -> Option<&Window> {
-        self.space.element_under(location).map(|(window, _)| window)
-    }
-
-    pub fn accept_new_floating_window(&mut self, window: Window) {
-        // TODO: We should calculate parent's position and insert this floating
-        // window (which is, in our model, a popup/dialog) at the center of the
-        // parent.
-        self.space.map_element(window.clone(), (0, 0), true);
-        self.windows.push(window.clone());
-        self.active_window = Some(window);
-    }
-
-    fn get_window_by_id(&self, window_id: &WindowId) -> Option<&Window> {
-        for window in &self.windows {
+        if let Some(window) = self.space.element_under(location).map(|(window, _)| window) {
             if let Some(surface) = window.wl_surface() {
-                if &surface.id() == window_id {
-                    return Some(window);
-                }
-            }
-        }
-        for element in self.space.elements() {
-            if let Some(surface) = element.wl_surface() {
-                if &surface.id() == window_id {
-                    return Some(element);
-                }
+                return self
+                    .windows
+                    .iter()
+                    .find(|window| window.id() == surface.id());
             }
         }
         None
     }
 
-    pub fn accept_new_tiling_window(&mut self, window: Window, placements: &Vec<WindowPlacement>) {
+    pub fn accept_new_floating_window(&mut self, floating_window: smithay::desktop::Window) {
+        // TODO: We should calculate parent's position and insert this floating
+        // window (which is, in our model, a popup/dialog) at the center of the
+        // parent.
+        self.space
+            .map_element(floating_window.clone(), (0, 0), true);
+        let window = Window::new(floating_window);
+        self.windows.push(window.clone());
+        self.active_window = Some(window);
+    }
+
+    fn get_window_by_id_mut(&mut self, window_id: &WindowId) -> Option<&mut Window> {
+        self.windows
+            .iter_mut()
+            .find(|window| window.id() == *window_id)
+    }
+
+    pub fn accept_new_tiling_window(
+        &mut self,
+        tiling_window: smithay::desktop::Window,
+        placements: Vec<WindowPlacement>,
+    ) {
+        let window = Window::new(tiling_window);
         self.windows.push(window.clone());
         self.active_window = Some(window);
 
         for placement in placements {
-            if let Some(placement_window) = self.get_window_by_id(&placement.window_id) {
-                if let Some(toplevel_surface) = placement_window.toplevel() {
-                    toplevel_surface.with_pending_state(|state| {
-                        state.size = Some((placement.rect.width, placement.rect.height).into());
-                    });
-                    toplevel_surface.send_configure();
-                }
-                self.space.map_element(
-                    placement_window.clone(),
-                    (placement.rect.x, placement.rect.y),
-                    true,
-                );
-            }
+            let Some(placement_window) = self.get_window_by_id_mut(&placement.window_id) else {
+                continue;
+            };
+
+            placement_window.with_pending_state(|state| {
+                state.size = Some((placement.rect.width, placement.rect.height).into());
+            });
+
+            let element = placement_window.set_placement(&placement);
+            self.space
+                .map_element(element, (placement.rect.x, placement.rect.y), true);
         }
     }
 }
@@ -187,7 +189,7 @@ impl LayoutManager {
             width: self.screen_size.w,
             height: self.screen_size.h,
         };
-        let window = Window::new_wayland_window(surface);
+        let window = smithay::desktop::Window::new_wayland_window(surface);
 
         let new_window_id: WindowId;
         if let Some(wl_surface) = window.wl_surface() {
@@ -201,13 +203,7 @@ impl LayoutManager {
         let active_window_id = {
             let active_workspace = self.current_workspace_mut();
             match active_workspace.active_window {
-                Some(ref active_window) => {
-                    if let Some(surface) = active_window.wl_surface() {
-                        Some(surface.id())
-                    } else {
-                        None
-                    }
-                }
+                Some(ref active_window) => Some(active_window.id()),
                 None => None,
             }
         };
@@ -220,7 +216,7 @@ impl LayoutManager {
                 self.tiling_mode
                     .calculate_placements(&screen_rect, &mut placements);
                 self.current_workspace_mut()
-                    .accept_new_tiling_window(window, &placements);
+                    .accept_new_tiling_window(window, placements);
                 return;
             }
         }
@@ -248,7 +244,7 @@ impl LayoutManager {
         active_workspace.space.map_output(output, (0, 0));
     }
 
-    pub fn get_active_space(&self) -> &Space<Window> {
+    pub fn get_active_space(&self) -> &Space<smithay::desktop::Window> {
         &self.current_workspace().space
     }
 

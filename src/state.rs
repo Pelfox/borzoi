@@ -44,12 +44,13 @@ pub struct CompositorAppState {
 
     /// Target rendering backend for the compositor.
     pub backend: Option<Box<dyn Backend>>,
-
     /// Signal, attached to the main event loop.
     pub loop_signal: LoopSignal,
-
+    /// Current input devices state.
     pub input_state: InputState<Self>,
+    /// Initialized shortcuts component instance.
     pub shortcuts: ShortcutsComponent,
+    /// Instance of the layout manager.
     pub layout_manager: LayoutManager,
 }
 

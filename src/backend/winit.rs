@@ -10,7 +10,6 @@ use smithay::{
         },
         winit::{self, WinitEventLoop, WinitGraphicsBackend},
     },
-    desktop::space::SpaceElement,
     input::pointer::{ButtonEvent, MotionEvent},
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{calloop::LoopHandle, winit::dpi::PhysicalSize},
@@ -190,11 +189,19 @@ impl Backend for WinitBackend {
                     }
                     winit::WinitEvent::Input(input) => {
                         match input {
+                            smithay::backend::input::InputEvent::DeviceAdded { device } => {
+                                if let Err(e) = state.input_state.on_device_added(&device) {
+                                    log::error!("Failed to register a new device: {e:?}");
+                                }
+                            }
+                            smithay::backend::input::InputEvent::DeviceRemoved { device } => {
+                                state.input_state.on_device_removed(&device);
+                            }
                             smithay::backend::input::InputEvent::Keyboard { event } => {
-                                match state.input_state.keyboard_handle_for_device(event.device()) {
+                                match state.input_state.keyboard_handle_for_device(&event.device()) {
                                     Ok(handle) => {
                                         handle.input(state, event.key_code(), event.state(), SERIAL_COUNTER.next_serial(), event.time_msec(), |state, modifiers, keysym_handle| {
-                                            let shortcut = state.shortcuts.shortcut_for_keystroke(modifiers.into(), keysym_handle.raw_syms());
+                                            let shortcut = state.shortcuts.find_shortcut(modifiers.into(), keysym_handle.raw_syms());
                                             if let Some(shortcut) = shortcut && event.state() == KeyState::Pressed {
                                                 if let Err(e) = shortcut.execute() {
                                                     log::error!("Failed to process the shortcut: {e:?}");
@@ -208,14 +215,6 @@ impl Backend for WinitBackend {
                                     Err(e) => log::error!("Failed to acquire keyboard handle for device: {e:?}"),
                                 };
                             }
-                            smithay::backend::input::InputEvent::DeviceAdded { device } => {
-                                if let Err(e) = state.input_state.on_device_added(device) {
-                                    log::error!("Failed to register a new device: {e:?}");
-                                }
-                            }
-                            smithay::backend::input::InputEvent::DeviceRemoved { device } => {
-                                state.input_state.on_device_removed(device);
-                            }
                             smithay::backend::input::InputEvent::PointerMotionAbsolute {
                                 event,
                             } => {
@@ -223,7 +222,7 @@ impl Backend for WinitBackend {
                                 let location = event.position_transformed(output_size);
                                 let surface_underneath = state.layout_manager.current_workspace().surface_under_location(location);
 
-                                match state.input_state.pointer_handle_for_device(event.device()) {
+                                match state.input_state.pointer_handle_for_device(&event.device()) {
                                     Ok(handle) => {
                                         let event = MotionEvent {
                                             location,
@@ -244,24 +243,44 @@ impl Backend for WinitBackend {
                                 if let Some(mouse_button) = event.button() {
                                     match mouse_button {
                                         smithay::backend::input::MouseButton::Left => {
-                                            match state.input_state.pointer_handle_for_device(event.device()) {
+                                            match state.input_state.pointer_handle_for_device(&event.device()) {
                                                 Ok(handle) => {
-                                                    let underlying_window = state.layout_manager.current_workspace().window_under_location(handle.current_location());
-                                                    if let Some(underlying_window) = underlying_window {
-                                                        let mut should_activate_window = false;
+                                                    let pointer_location = handle.current_location();
 
-                                                        if let Some(window) = state.layout_manager.active_window() {
-                                                            if underlying_window != window {
-                                                                should_activate_window = true;
+                                                    let underlying_window = {
+                                                        state
+                                                            .layout_manager
+                                                            .current_workspace()
+                                                            .window_under_location(pointer_location)
+                                                            .cloned()
+                                                    };
+
+                                                    if let Some(underlying_window) = underlying_window {
+                                                        let should_activate_window = {
+                                                            match state.layout_manager.active_window().clone() {
+                                                                Some(active_window) => active_window != underlying_window,
+                                                                None => true,
                                                             }
-                                                        } else {
-                                                            should_activate_window = true;
-                                                        }
+                                                        };
 
                                                         if should_activate_window {
-                                                            println!("Activating window: {underlying_window:?}");
-                                                            underlying_window.set_activate(true);
-                                                            state.layout_manager.set_active_window(underlying_window.clone());
+                                                            let keyboard = state.input_state.get_keyboard();
+                                                            let focus = underlying_window.surface();
+                                                            let serial = SERIAL_COUNTER.next_serial();
+
+                                                            underlying_window.clone().activate();
+
+                                                            if let Some(keyboard) = keyboard {
+                                                                keyboard.set_focus(
+                                                                    state,
+                                                                    focus,
+                                                                    serial,
+                                                                );
+                                                            }
+
+                                                            state
+                                                                .layout_manager
+                                                                .set_active_window(underlying_window.clone());
                                                         }
                                                     }
 
@@ -277,7 +296,7 @@ impl Backend for WinitBackend {
                                         },
                                         smithay::backend::input::MouseButton::Right => todo!(),
                                         _ => {
-                                            match state.input_state.pointer_handle_for_device(event.device()) {
+                                            match state.input_state.pointer_handle_for_device(&event.device()) {
                                                 Ok(handle) => {
                                                     handle.button(state, &ButtonEvent{
                                                         serial: SERIAL_COUNTER.next_serial(),

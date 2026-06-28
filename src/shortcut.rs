@@ -66,7 +66,7 @@ impl ShortcutsComponent {
         self.registry.push(shortcut);
     }
 
-    pub fn shortcut_for_keystroke(
+    pub fn find_shortcut(
         &self,
         modifiers: KeyboardModifiers,
         keysyms_delta: Vec<xkeysym::Keysym>,

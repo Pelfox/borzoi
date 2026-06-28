@@ -36,7 +36,6 @@ impl CompositorApp {
         B: Backend + 'static,
     {
         let display_handle = display.handle();
-
         let event_loop = EventLoop::<CompositorAppState>::try_new()?;
         let loop_signal = event_loop.get_signal();
 

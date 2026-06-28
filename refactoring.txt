@@ -1,0 +1,7 @@
+Already refactored:
+- Window
+- Tiling (everything)
+- Client
+- State
+- Input State - except for auto-detection of slot
+- Compositor - except for shortcuts
