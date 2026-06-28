@@ -1,5 +1,6 @@
 use smithay::{
     desktop::space::SpaceElement,
+    reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State,
     wayland::{seat::WaylandFocus, shell::xdg::ToplevelState},
 };
 use wayland_server::{Resource, protocol::wl_surface::WlSurface};
@@ -53,6 +54,12 @@ impl PartialEq for Window {
     }
 }
 
+impl Into<smithay::desktop::Window> for Window {
+    fn into(self) -> smithay::desktop::Window {
+        self.inner
+    }
+}
+
 impl Window {
     /// Creates a new [Window] from the given underlying Smithay's Window.
     pub fn new(inner: smithay::desktop::Window) -> Self {
@@ -91,9 +98,23 @@ impl Window {
     }
 
     /// Activates this window.
-    pub fn activate(&mut self) {
-        // self.inner.set_activate(true);
+    pub fn activate(&self) {
+        self.inner.set_activate(true);
         self.inner.set_activated(true);
+        self.with_pending_state(|state| {
+            state.states.set(State::Activated);
+        });
+    }
+
+    /// Deactivates this window.
+    pub fn deactivate(&self, unset: bool) {
+        self.inner.set_activate(false);
+        self.inner.set_activated(false);
+        if unset {
+            self.with_pending_state(|state| {
+                state.states.unset(State::Activated);
+            });
+        }
     }
 
     /// Retrieves the underlying surface of the window.

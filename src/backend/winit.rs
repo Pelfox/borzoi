@@ -3,14 +3,24 @@ use std::{cell::RefCell, rc::Rc};
 
 use smithay::{
     backend::{
-        input::{AbsolutePositionEvent, Event, KeyState, KeyboardKeyEvent, PointerButtonEvent},
+        input::{
+            AbsolutePositionEvent, ButtonState, Device, Event, InputEvent, KeyState,
+            KeyboardKeyEvent, PointerButtonEvent,
+        },
         renderer::{
             Color32F, damage::OutputDamageTracker, element::surface::WaylandSurfaceRenderElement,
             gles::GlesRenderer,
         },
-        winit::{self, WinitEventLoop, WinitGraphicsBackend},
+        winit::{
+            self, WinitEvent, WinitEventLoop, WinitGraphicsBackend, WinitInput,
+            WinitKeyboardInputEvent, WinitMouseInputEvent, WinitMouseMovedEvent,
+        },
     },
-    input::pointer::{ButtonEvent, MotionEvent},
+    desktop::space::render_output,
+    input::{
+        keyboard::{FilterResult, KeyboardHandle},
+        pointer::{ButtonEvent, MotionEvent, PointerHandle},
+    },
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{calloop::LoopHandle, winit::dpi::PhysicalSize},
     utils::{Logical, Rectangle, SERIAL_COUNTER, Size, Transform},
@@ -53,6 +63,264 @@ impl WinitBackend {
             global_id: None,
             renderer: Rc::new(RefCell::new(renderer)),
         })
+    }
+
+    fn on_shutdown_event(state: &mut CompositorAppState) {
+        state.loop_signal.stop();
+        log::info!("Received close request, shutting down.");
+    }
+
+    fn on_keyboard_input(
+        handle: &KeyboardHandle<CompositorAppState>,
+        state: &mut CompositorAppState,
+        event: &WinitKeyboardInputEvent,
+    ) -> Option<anyhow::Result<()>> {
+        let serial = SERIAL_COUNTER.next_serial();
+        handle.input(
+            state,
+            event.key_code(),
+            event.state(),
+            serial,
+            event.time_msec(),
+            |state, modifiers, keysym_handle| {
+                if event.state() != KeyState::Pressed {
+                    return FilterResult::<anyhow::Result<()>>::Forward;
+                }
+
+                if let Some(shortcut) = state
+                    .shortcuts
+                    .find_shortcut(modifiers.into(), keysym_handle.raw_syms())
+                {
+                    log::debug!("Executing shortcut");
+                    return FilterResult::Intercept(shortcut.execute());
+                }
+
+                FilterResult::Forward
+            },
+        )
+    }
+
+    fn on_pointer_absolute_motion(
+        handle: &PointerHandle<CompositorAppState>,
+        state: &mut CompositorAppState,
+        event: &WinitMouseMovedEvent,
+        renderer: Rc<RefCell<WinitBackendRenderer>>,
+    ) {
+        let renderer = renderer.borrow();
+        let location = event.position_transformed(renderer.backend.window_size().to_logical(1));
+
+        let surface_underneath_pointer = state
+            .layout_manager
+            .current_workspace()
+            .surface_under_location(location);
+
+        let serial = SERIAL_COUNTER.next_serial();
+        handle.motion(
+            state,
+            surface_underneath_pointer,
+            &MotionEvent {
+                location,
+                serial,
+                time: event.time_msec(),
+            },
+        );
+    }
+
+    fn on_pointer_click(
+        handle: &PointerHandle<CompositorAppState>,
+        event: &WinitMouseInputEvent,
+        state: &mut CompositorAppState,
+    ) {
+        let current_workspace = state.layout_manager.current_workspace();
+        let window_underneath = current_workspace.window_under_location(handle.current_location());
+
+        let mut should_activate_window = false;
+        if current_workspace.active_window.is_none()
+            || window_underneath != current_workspace.active_window
+        {
+            should_activate_window = true;
+        }
+
+        // Windows can be only activated on press.
+        let can_activate_window = event.state() == ButtonState::Pressed;
+        if let Some(window_underneath) = window_underneath
+            && should_activate_window
+            && can_activate_window
+        {
+            // Deactivate previous window.
+            if let Some(ref previous_window) = current_workspace.active_window {
+                previous_window.deactivate(true);
+                log::debug!("Window {:?} deactivated", previous_window.id());
+            }
+
+            // Make keyboard focus this window as a primary.
+            log::debug!("Focusing window {:?}", window_underneath.id());
+            if let Some(keyboard_handle) = state.input_state.get_keyboard() {
+                let serial = SERIAL_COUNTER.next_serial();
+                keyboard_handle.set_focus(state, window_underneath.surface(), serial);
+            }
+
+            window_underneath.activate();
+            state.layout_manager.set_active_window(window_underneath);
+        }
+
+        let serial = SERIAL_COUNTER.next_serial();
+        handle.button(
+            state,
+            &ButtonEvent {
+                serial,
+                time: event.time_msec(),
+                button: event.button_code(),
+                state: event.state(),
+            },
+        );
+        log::debug!("Tracked pointer button activation: {:?}", event.button());
+    }
+
+    fn on_input_event(
+        event: &InputEvent<WinitInput>,
+        state: &mut CompositorAppState,
+        renderer: Rc<RefCell<WinitBackendRenderer>>,
+    ) {
+        match event {
+            InputEvent::DeviceAdded { device } => {
+                if let Err(e) = state.input_state.on_device_added(device) {
+                    log::error!("Failed to register device {:?}: {e:?}", device.id());
+                    return;
+                }
+                log::info!("Device {} was added and registered", device.id());
+            }
+            InputEvent::DeviceRemoved { device } => {
+                state.input_state.on_device_removed(device);
+                log::info!("Device {} was removed and unregistered", device.id());
+            }
+            InputEvent::Keyboard { event } => {
+                println!("Keyboard event: {event:?}");
+                match state.input_state.device_keyboard_handle(&event.device()) {
+                    Ok(handle) => {
+                        if let Some(Err(e)) = Self::on_keyboard_input(&handle, state, event) {
+                            log::error!(
+                                "Failed to process keyboard event for {}: {e:?}",
+                                event.device().id()
+                            );
+                            return;
+                        }
+                        if let Some(ref mut backend) = state.backend {
+                            backend.request_redraw();
+                        }
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "Failed to retrieve keyboard handle for {}: {e:?}",
+                            event.device().id()
+                        );
+                    }
+                }
+            }
+            InputEvent::PointerMotionAbsolute { event } => {
+                match state.input_state.pointer_handle_for_device(&event.device()) {
+                    Ok(handle) => {
+                        Self::on_pointer_absolute_motion(&handle, state, event, renderer);
+                        if let Some(ref mut backend) = state.backend {
+                            backend.request_redraw();
+                        }
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "Failed to retrieve pointer handle for {}: {e:?}",
+                            event.device().id()
+                        );
+                    }
+                }
+            }
+            InputEvent::PointerButton { event } => {
+                match state.input_state.pointer_handle_for_device(&event.device()) {
+                    Ok(handle) => {
+                        Self::on_pointer_click(&handle, event, state);
+                        if let Some(ref mut backend) = state.backend {
+                            backend.request_redraw();
+                        }
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "Failed to retrieve pointer handle for {}: {e:?}",
+                            event.device().id()
+                        );
+                    }
+                }
+            }
+            // TODO: InputEvent::PointerAxis { event } => todo!(),
+            event => log::debug!("Received an unhandled input event: {event:?}"),
+        }
+    }
+
+    fn on_redraw_event(
+        state: &mut CompositorAppState,
+        renderer: Rc<RefCell<WinitBackendRenderer>>,
+    ) {
+        let backend_renderer = &mut *renderer.borrow_mut();
+        let Some(ref output) = backend_renderer.output else {
+            log::error!("Redraw was requested before output was initialized");
+            return;
+        };
+
+        {
+            let (renderer, mut framebuffer) = match backend_renderer.backend.bind() {
+                Ok(values) => values,
+                Err(e) => {
+                    log::error!("Failed to acquire renderer and framebuffer from backend: {e:?}");
+                    return;
+                }
+            };
+
+            let Some(damage_tracker) = backend_renderer.damage_tracker.as_mut() else {
+                log::error!("Redraw was requested before damage tracker was initialized");
+                return;
+            };
+
+            let render_result = render_output::<_, WaylandSurfaceRenderElement<GlesRenderer>, _, _>(
+                output,
+                renderer,
+                &mut framebuffer,
+                1.0,                                       // Opacity for the drawn texture.
+                0,                                         // How old the buffer is.
+                [state.layout_manager.get_active_space()], // Space to draw the window in.
+                &[],                                       // Cursors, decorations, and so on.
+                damage_tracker,
+                Color32F::new(0.0, 0.0, 0.0, 1.0), // Background color used to clear out the output.
+            );
+
+            if let Err(e) = render_result {
+                log::error!("Failed to submit render: {e:?}");
+            }
+        }
+
+        let damage = Rectangle::from_size(backend_renderer.backend.window_size());
+        if let Err(e) = backend_renderer.backend.submit(Some(&[damage])) {
+            log::error!("Failed to submit damage to renderer backend: {e:?}");
+            return;
+        }
+
+        state.layout_manager.refresh_frame(output);
+        if let Err(e) = state.layout_manager.display_handle.flush_clients() {
+            log::error!("Failed to update display clients: {e:?}");
+            return;
+        }
+
+        backend_renderer.backend.window().request_redraw();
+    }
+
+    fn on_event_dispatched(
+        event: &WinitEvent,
+        state: &mut CompositorAppState,
+        renderer: Rc<RefCell<WinitBackendRenderer>>,
+    ) {
+        match event {
+            WinitEvent::CloseRequested => Self::on_shutdown_event(state),
+            WinitEvent::Input(event) => Self::on_input_event(event, state, renderer),
+            WinitEvent::Redraw => Self::on_redraw_event(state, renderer),
+            event => log::debug!("Received an unhandled winit event: {event:?}"),
+        }
     }
 }
 
@@ -116,211 +384,11 @@ impl Backend for WinitBackend {
             Some(event_loop) => event_loop,
             None => anyhow::bail!("winit event loop was already registered"),
         };
-        let renderer_inner = Rc::clone(&self.renderer);
 
+        let renderer_inner = Rc::clone(&self.renderer);
         event_loop_handle
             .insert_source(winit_event_loop, move |event, _, state| {
-                match event {
-                    winit::WinitEvent::Redraw => {
-                        let WinitBackendRenderer {
-                            backend,
-                            output,
-                            damage_tracker,
-                        } = &mut *renderer_inner.borrow_mut();
-
-                        let size = backend.window_size();
-                        let damage = Rectangle::from_size(size);
-
-                        let Some(output) = output.as_ref() else {
-                            log::error!("Redrawn requested before output was initialized");
-                            return;
-                        };
-
-                        {
-                            let (renderer, mut framebuffer);
-                            match backend.bind() {
-                                Ok((result_renderer, result_framebuffer)) => {
-                                    renderer = result_renderer;
-                                    framebuffer = result_framebuffer;
-                                }
-                                Err(e) => {
-                                    log::error!("failed to acquire renderer and framebuffer from backend: {e:?}");
-                                    return;
-                                }
-                            }
-
-                            let Some(damage_tracker) = damage_tracker.as_mut() else {
-                                log::error!("Redrawn requested before damage tracker was initialized");
-                                return;
-                            };
-
-                            let render_result = smithay::desktop::space::render_output::<
-                                _,
-                                WaylandSurfaceRenderElement<GlesRenderer>,
-                                _,
-                                _,
-                            >(
-                                output,
-                                renderer,
-                                &mut framebuffer,
-                                1.0,            // Opacity for the drawn texture.
-                                0,              // How old the buffer is.
-                                [state.layout_manager.get_active_space()], // Space to draw the window in.
-                                &[],            // Cursors, decorations, and so on.
-                                damage_tracker,
-                                Color32F::new(0.0, 0.0, 0.0, 1.0), // Background color used to clear out the output.
-                            );
-                            match render_result {
-                                Ok(_) => log::debug!("Successfully rendered the output"),
-                                Err(e) => log::error!("Failed to render the output: {e:?}"),
-                            }
-                        }
-
-                        if let Err(e) = backend.submit(Some(&[damage])) {
-                            log::error!("Failed to submit damage to the backend renderer: {e:?}");
-                        }
-
-                        state.layout_manager.refresh_frame(output);
-                        if let Err(e) = state.layout_manager.display_handle.flush_clients() {
-                            log::error!("Failed to flush display clients: {e:?}");
-                        }
-
-                        backend.window().request_redraw();
-                    }
-                    winit::WinitEvent::Input(input) => {
-                        match input {
-                            smithay::backend::input::InputEvent::DeviceAdded { device } => {
-                                if let Err(e) = state.input_state.on_device_added(&device) {
-                                    log::error!("Failed to register a new device: {e:?}");
-                                }
-                            }
-                            smithay::backend::input::InputEvent::DeviceRemoved { device } => {
-                                state.input_state.on_device_removed(&device);
-                            }
-                            smithay::backend::input::InputEvent::Keyboard { event } => {
-                                match state.input_state.keyboard_handle_for_device(&event.device()) {
-                                    Ok(handle) => {
-                                        handle.input(state, event.key_code(), event.state(), SERIAL_COUNTER.next_serial(), event.time_msec(), |state, modifiers, keysym_handle| {
-                                            let shortcut = state.shortcuts.find_shortcut(modifiers.into(), keysym_handle.raw_syms());
-                                            if let Some(shortcut) = shortcut && event.state() == KeyState::Pressed {
-                                                if let Err(e) = shortcut.execute() {
-                                                    log::error!("Failed to process the shortcut: {e:?}");
-                                                }
-                                                smithay::input::keyboard::FilterResult::<()>::Intercept(())
-                                            } else {
-                                                smithay::input::keyboard::FilterResult::<()>::Forward
-                                            }
-                                        });
-                                    },
-                                    Err(e) => log::error!("Failed to acquire keyboard handle for device: {e:?}"),
-                                };
-                            }
-                            smithay::backend::input::InputEvent::PointerMotionAbsolute {
-                                event,
-                            } => {
-                                let output_size = renderer_inner.borrow().backend.window_size().to_logical(1);
-                                let location = event.position_transformed(output_size);
-                                let surface_underneath = state.layout_manager.current_workspace().surface_under_location(location);
-
-                                match state.input_state.pointer_handle_for_device(&event.device()) {
-                                    Ok(handle) => {
-                                        let event = MotionEvent {
-                                            location,
-                                            serial: SERIAL_COUNTER.next_serial(),
-                                            time: event.time_msec(),
-                                        };
-                                        handle.motion(state, surface_underneath, &event);
-                                    },
-                                    Err(e) => log::error!("Failed acquire pointer handle for device: {e:?}"),
-                                };
-
-                                state.request_redraw();
-                            },
-                            smithay::backend::input::InputEvent::PointerAxis { event } => {
-                                todo!()
-                            },
-                            smithay::backend::input::InputEvent::PointerButton { event } => {
-                                if let Some(mouse_button) = event.button() {
-                                    match mouse_button {
-                                        smithay::backend::input::MouseButton::Left => {
-                                            match state.input_state.pointer_handle_for_device(&event.device()) {
-                                                Ok(handle) => {
-                                                    let pointer_location = handle.current_location();
-
-                                                    let underlying_window = {
-                                                        state
-                                                            .layout_manager
-                                                            .current_workspace()
-                                                            .window_under_location(pointer_location)
-                                                            .cloned()
-                                                    };
-
-                                                    if let Some(underlying_window) = underlying_window {
-                                                        let should_activate_window = {
-                                                            match state.layout_manager.active_window().clone() {
-                                                                Some(active_window) => active_window != underlying_window,
-                                                                None => true,
-                                                            }
-                                                        };
-
-                                                        if should_activate_window {
-                                                            let keyboard = state.input_state.get_keyboard();
-                                                            let focus = underlying_window.surface();
-                                                            let serial = SERIAL_COUNTER.next_serial();
-
-                                                            underlying_window.clone().activate();
-
-                                                            if let Some(keyboard) = keyboard {
-                                                                keyboard.set_focus(
-                                                                    state,
-                                                                    focus,
-                                                                    serial,
-                                                                );
-                                                            }
-
-                                                            state
-                                                                .layout_manager
-                                                                .set_active_window(underlying_window.clone());
-                                                        }
-                                                    }
-
-                                                    handle.button(state, &ButtonEvent{
-                                                        serial: SERIAL_COUNTER.next_serial(),
-                                                        time: event.time_msec(),
-                                                        button: event.button_code(),
-                                                        state: event.state(),
-                                                    });
-                                                },
-                                                Err(e) => log::error!("Failed acquire pointer handle for device: {e:?}"),
-                                            }
-                                        },
-                                        smithay::backend::input::MouseButton::Right => todo!(),
-                                        _ => {
-                                            match state.input_state.pointer_handle_for_device(&event.device()) {
-                                                Ok(handle) => {
-                                                    handle.button(state, &ButtonEvent{
-                                                        serial: SERIAL_COUNTER.next_serial(),
-                                                        time: event.time_msec(),
-                                                        button: event.button_code(),
-                                                        state: event.state(),
-                                                    });
-                                                }
-                                                Err(e) => log::error!("Failed acquire pointer handle for device: {e:?}"),
-                                            };
-                                        },
-                                    }
-                                }
-                            },
-                            // smithay::backend::input::InputEvent::PointerAxis { event } => todo!(),
-                            event => log::debug!("Received input event from winit: {event:?}"),
-                        }
-                    }
-                    winit::WinitEvent::CloseRequested => state.loop_signal.stop(),
-                    winit::WinitEvent::Focus(is_focused) => {
-                        log::info!("Focus state changed to: is_focused={is_focused}");
-                    }
-                    _ => {}
-                };
+                Self::on_event_dispatched(&event, state, renderer_inner.clone());
             })
             .map_err(|err| anyhow::anyhow!("failed to register winit event source: {err:?}"))?;
 

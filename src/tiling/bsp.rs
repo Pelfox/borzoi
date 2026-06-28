@@ -61,6 +61,7 @@ fn split_rect(rect: &WindowRect, direction: &SplitDirection) -> (WindowRect, Win
     }
 }
 
+/// Counts total amount of window splits from the given node.
 fn count_splits(root: &WindowNode) -> i32 {
     match root {
         WindowNode::Leaf { .. } => 0,
@@ -152,6 +153,40 @@ fn is_window_in_tree(root: &WindowNode, target_window_id: &WindowId) -> bool {
     }
 }
 
+/// Removes window with the given ID from the BSP tree.
+fn remove_window(root: &WindowNode, target_window_id: &WindowId) -> Option<WindowNode> {
+    match root {
+        WindowNode::Leaf { window_id } => {
+            if window_id != target_window_id {
+                Some(WindowNode::Leaf {
+                    window_id: window_id.clone(),
+                })
+            } else {
+                None
+            }
+        }
+        WindowNode::Split {
+            direction,
+            left,
+            right,
+        } => {
+            let left = remove_window(left, target_window_id);
+            let right = remove_window(right, target_window_id);
+
+            match (left, right) {
+                (None, None) => None,
+                (None, Some(right)) => Some(right),
+                (Some(left), None) => Some(left),
+                (Some(left), Some(right)) => Some(WindowNode::Split {
+                    direction: direction.clone(),
+                    left: Box::new(left),
+                    right: Box::new(right),
+                }),
+            }
+        }
+    }
+}
+
 impl TilingMode for BspTilingMode {
     fn accept_window(&mut self, window_id: &WindowId, active_window_id: Option<WindowId>) {
         // Disallow the same window from being registered multiple times.
@@ -199,6 +234,12 @@ impl TilingMode for BspTilingMode {
     fn calculate_placements(&self, rect: &WindowRect, placements: &mut Vec<WindowPlacement>) {
         if let Some(ref root) = self.root {
             calculate_placements(root, rect, placements);
+        }
+    }
+
+    fn destroy_window(&mut self, window_id: &WindowId) {
+        if let Some(ref root) = self.root {
+            self.root = remove_window(root, window_id);
         }
     }
 }

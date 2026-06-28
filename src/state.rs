@@ -2,7 +2,7 @@ use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     input::{SeatHandler, SeatState},
     reexports::calloop::LoopSignal,
-    utils::Serial,
+    utils::{SERIAL_COUNTER, Serial},
     wayland::{
         buffer::BufferHandler,
         compositor::{CompositorClientState, CompositorHandler, CompositorState},
@@ -123,8 +123,15 @@ impl XdgShellHandler for CompositorAppState {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        self.layout_manager.spawn_client_window(surface);
+        self.layout_manager.spawn_client_window(&surface);
         self.request_redraw();
+
+        // Register this window as focused.
+        if let Some(keyboard_handle) = self.input_state.get_keyboard() {
+            let wl_surface = surface.wl_surface().clone();
+            let serial = SERIAL_COUNTER.next_serial();
+            keyboard_handle.set_focus(self, Some(wl_surface), serial);
+        }
     }
 
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
@@ -147,6 +154,25 @@ impl XdgShellHandler for CompositorAppState {
         token: u32,
     ) {
         self.layout_manager.reposition(surface, positioner, token);
+        self.request_redraw();
+    }
+
+    fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        self.layout_manager.on_toplevel_destroy(&surface);
+        self.request_redraw();
+
+        if let Some(keyboard_handle) = self.input_state.get_keyboard() {
+            if let Some(current_focus) = keyboard_handle.current_focus() {
+                if current_focus.id() == surface.wl_surface().id() {
+                    let serial = SERIAL_COUNTER.next_serial();
+                    keyboard_handle.set_focus(self, None, serial);
+                }
+            }
+        }
+    }
+
+    fn popup_destroyed(&mut self, surface: PopupSurface) {
+        self.layout_manager.on_popup_destroy(surface);
         self.request_redraw();
     }
 }

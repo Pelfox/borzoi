@@ -73,7 +73,7 @@ where
     }
 
     /// Retrieves keyboard handle for the given device.
-    pub fn keyboard_handle_for_device<D>(&self, device: &D) -> anyhow::Result<KeyboardHandle<S>>
+    pub fn device_keyboard_handle<D>(&self, device: &D) -> anyhow::Result<KeyboardHandle<S>>
     where
         D: Device,
     {

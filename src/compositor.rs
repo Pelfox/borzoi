@@ -54,7 +54,7 @@ impl CompositorApp {
                 ..Default::default()
             },
             keysyms: vec![keysyms::KEY_b],
-            action: ShortcutAction::Command("helium-browser".to_owned()),
+            action: ShortcutAction::Command("firefox".to_owned()),
         });
 
         let layout_manager = LayoutManager::new(display_handle.clone(), backend.output_size());

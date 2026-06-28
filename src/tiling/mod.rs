@@ -1,7 +1,7 @@
 pub mod bsp;
 
 /// Direction of a windows split on workspace update.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub enum SplitDirection {
     /// Indicates that the existing windows will be splitted vertically.
     Vertical,
@@ -42,4 +42,6 @@ pub trait TilingMode {
         rect: &crate::window::WindowRect,
         placements: &mut Vec<crate::window::WindowPlacement>,
     );
+    /// Removes window with the given ID from the inernal tree.
+    fn destroy_window(&mut self, window_id: &crate::window::WindowId);
 }

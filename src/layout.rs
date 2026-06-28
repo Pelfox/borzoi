@@ -1,4 +1,4 @@
-use std::{os::unix::net::UnixStream, sync::Arc};
+use std::{collections::HashMap, os::unix::net::UnixStream, sync::Arc};
 
 use smithay::{
     desktop::{PopupKind, PopupManager, Space, WindowSurfaceType},
@@ -22,15 +22,15 @@ type ScreenSize = Size<i32, Logical>;
 
 pub struct Workspace {
     space: Space<smithay::desktop::Window>,
-    windows: Vec<Window>,
-    active_window: Option<Window>,
+    windows: HashMap<WindowId, Window>,
+    pub active_window: Option<Window>,
 }
 
 impl Workspace {
     pub fn new() -> Self {
         Self {
             space: Space::default(),
-            windows: Vec::new(),
+            windows: HashMap::new(),
             active_window: None,
         }
     }
@@ -49,13 +49,10 @@ impl Workspace {
         ))
     }
 
-    pub fn window_under_location(&self, location: Point<f64, Logical>) -> Option<&Window> {
+    pub fn window_under_location(&self, location: Point<f64, Logical>) -> Option<Window> {
         if let Some(window) = self.space.element_under(location).map(|(window, _)| window) {
             if let Some(surface) = window.wl_surface() {
-                return self
-                    .windows
-                    .iter()
-                    .find(|window| window.id() == surface.id());
+                return self.windows.get(&surface.id()).map(|window| window.clone());
             }
         }
         None
@@ -68,27 +65,13 @@ impl Workspace {
         self.space
             .map_element(floating_window.clone(), (0, 0), true);
         let window = Window::new(floating_window);
-        self.windows.push(window.clone());
+        self.windows.insert(window.id(), window.clone());
         self.active_window = Some(window);
     }
 
-    fn get_window_by_id_mut(&mut self, window_id: &WindowId) -> Option<&mut Window> {
-        self.windows
-            .iter_mut()
-            .find(|window| window.id() == *window_id)
-    }
-
-    pub fn accept_new_tiling_window(
-        &mut self,
-        tiling_window: smithay::desktop::Window,
-        placements: Vec<WindowPlacement>,
-    ) {
-        let window = Window::new(tiling_window);
-        self.windows.push(window.clone());
-        self.active_window = Some(window);
-
+    fn submit_windows_placements(&mut self, placements: Vec<WindowPlacement>) {
         for placement in placements {
-            let Some(placement_window) = self.get_window_by_id_mut(&placement.window_id) else {
+            let Some(placement_window) = self.windows.get_mut(&placement.window_id) else {
                 continue;
             };
 
@@ -100,6 +83,36 @@ impl Workspace {
             self.space
                 .map_element(element, (placement.rect.x, placement.rect.y), true);
         }
+    }
+
+    pub fn accept_new_tiling_window(
+        &mut self,
+        tiling_window: smithay::desktop::Window,
+        placements: Vec<WindowPlacement>,
+    ) {
+        if let Some(ref old_window) = self.active_window {
+            old_window.deactivate(true);
+        }
+
+        let window = Window::new(tiling_window);
+        self.windows.insert(window.id(), window.clone());
+        self.active_window = Some(window.clone());
+        self.submit_windows_placements(placements);
+        window.activate();
+    }
+
+    pub fn delete_window(&mut self, window_id: &WindowId, placements: Vec<WindowPlacement>) {
+        if let Some(window) = self.windows.remove(window_id) {
+            log::debug!("Window {:?} is no longer tracked", window.id());
+            self.space.unmap_elem(&window.into());
+        }
+        if let Some(ref active_window) = self.active_window {
+            if &active_window.id() == window_id {
+                self.active_window = None;
+                // TODO: We should find the next nearest window and make it active.
+            }
+        }
+        self.submit_windows_placements(placements);
     }
 }
 
@@ -180,16 +193,14 @@ impl LayoutManager {
         return false;
     }
 
-    pub fn spawn_client_window(&mut self, surface: ToplevelSurface) {
-        surface.send_configure();
-
+    pub fn spawn_client_window(&mut self, surface: &ToplevelSurface) {
         let screen_rect = WindowRect {
             x: 0,
             y: 0,
             width: self.screen_size.w,
             height: self.screen_size.h,
         };
-        let window = smithay::desktop::Window::new_wayland_window(surface);
+        let window = smithay::desktop::Window::new_wayland_window(surface.clone());
 
         let new_window_id: WindowId;
         if let Some(wl_surface) = window.wl_surface() {
@@ -261,6 +272,27 @@ impl LayoutManager {
         });
 
         active_workspace.space.refresh();
+        self.popups.cleanup();
+    }
+
+    pub fn on_toplevel_destroy(&mut self, surface: &ToplevelSurface) {
+        let window_id = surface.wl_surface().id();
+        self.tiling_mode.destroy_window(&window_id);
+
+        let screen_rect = WindowRect {
+            x: 0,
+            y: 0,
+            width: self.screen_size.w,
+            height: self.screen_size.h,
+        };
+        let mut placements = Vec::new();
+        self.tiling_mode
+            .calculate_placements(&screen_rect, &mut placements);
+        self.current_workspace_mut()
+            .delete_window(&window_id, placements);
+    }
+
+    pub fn on_popup_destroy(&mut self, _: PopupSurface) {
         self.popups.cleanup();
     }
 }
